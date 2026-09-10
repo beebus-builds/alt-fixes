@@ -11,7 +11,7 @@
     }[char]));
 
     const request = async (path, options = {}) => {
-        const response = await fetch((config.root || '/wp-json/') + path.replace(/^\//, ''), {
+        const response = await fetch((config.root || '/wp-json/alt-fixes/v1/') + path.replace(/^\//, ''), {
             credentials: 'same-origin',
             ...options,
             headers: {
@@ -74,8 +74,8 @@
             buttons.forEach((button) => { button.disabled = true; });
             status.textContent = 'Analyzing image and page context…';
             try {
-                const data = await request(`alt-fixes/v1/suggest/${id}`, { method: 'POST' });
-                input.value = data.suggestion || '';
+                const data = await request(`suggest/${id}`, { method: 'POST' });
+                input.value = data.suggestion || data.alt || '';
                 status.textContent = data.review_reason ? `Review: ${data.review_reason}` : 'Suggestion ready for review.';
             } catch (error) {
                 status.textContent = error.message;
@@ -93,7 +93,7 @@
             buttons.forEach((button) => { button.disabled = true; });
             status.textContent = 'Saving…';
             try {
-                await request(`alt-fixes/v1/approve/${id}`, {
+                await request(`approve/${id}`, {
                     method: 'POST',
                     body: JSON.stringify({ alt })
                 });
@@ -105,10 +105,18 @@
             }
         };
 
-        card.querySelector('.skip').onclick = () => {
-            card.remove();
-            if (!root.querySelector('.alt-fixes-card')) {
-                root.innerHTML = '<div class="alt-fixes-empty">No images need review.</div>';
+        card.querySelector('.skip').onclick = async () => {
+            buttons.forEach((button) => { button.disabled = true; });
+            status.textContent = 'Skipping…';
+            try {
+                await request(`skip/${id}`, { method: 'POST' });
+                card.remove();
+                if (!root.querySelector('.alt-fixes-card')) {
+                    root.innerHTML = '<div class="alt-fixes-empty">No images need review.</div>';
+                }
+            } catch (error) {
+                status.textContent = error.message;
+                buttons.forEach((button) => { button.disabled = false; });
             }
         };
     };
@@ -117,8 +125,8 @@
         scanButton.disabled = true;
         root.innerHTML = '<div class="alt-fixes-loading">Scanning image library…</div>';
         try {
-            const data = await request('alt-fixes/v1/scan?per_page=100');
-            render((data.items || data).filter((item) => item.needs_alt || item.suggestion));
+            const data = await request('scan?per_page=100&status=missing');
+            render(data.items || []);
         } catch (error) {
             root.innerHTML = `<div class="notice notice-error"><p>${esc(error.message)}</p></div>`;
         } finally {
