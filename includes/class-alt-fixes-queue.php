@@ -230,6 +230,115 @@ class Alt_Fixes_Queue {
             $ids
         ), ARRAY_A);
     }
+
+    /**
+     * Replace the original PHP-side scan with a paginated SQL query.
+     * The old scanner loaded every image ID and then read post meta for every
+     * attachment. This keeps filtering, counting, and pagination in MySQL.
+     */
+    public static function replace_scan_endpoint($endpoints) {
+        $route = '/alt-fixes/v1/scan';
+        if (isset($endpoints[$route][0])) {
+            $endpoints[$route][0]['callback'] = [__CLASS__, 'scan'];
+        }
+        return $endpoints;
+    }
+
+    public static function scan(WP_REST_Request $request) {
+        global $wpdb;
+
+        $page = max(1, absint($request->get_param('page')) ?: 1);
+        $per_page = min(100, max(1, absint($request->get_param('per_page')) ?: 24));
+        $status = sanitize_key($request->get_param('status') ?: 'all');
+        $allowed = ['all', 'missing', 'queued', 'processing', 'suggested', 'approved', 'skipped', 'failed'];
+        if (!in_array($status, $allowed, true)) {
+            $status = 'all';
+        }
+
+        $posts = $wpdb->posts;
+        $meta = $wpdb->postmeta;
+        $joins = '';
+        $where = "p.post_type = 'attachment' AND p.post_status = 'inherit' AND p.post_mime_type LIKE 'image/%'";
+        $args = [];
+
+        if ($status !== 'all') {
+            $joins = "
+                LEFT JOIN {$meta} AS status_meta
+                    ON status_meta.post_id = p.ID AND status_meta.meta_key = '_alt_fixes_status'
+                LEFT JOIN {$meta} AS alt_meta
+                    ON alt_meta.post_id = p.ID AND alt_meta.meta_key = '_wp_attachment_image_alt'
+                LEFT JOIN {$meta} AS suggestion_meta
+                    ON suggestion_meta.post_id = p.ID AND suggestion_meta.meta_key = '_alt_fixes_suggestion'";
+
+            switch ($status) {
+                case 'missing':
+                    $where .= " AND COALESCE(status_meta.meta_value, '') = ''
+                        AND COALESCE(alt_meta.meta_value, '') = ''
+                        AND COALESCE(suggestion_meta.meta_value, '') = ''";
+                    break;
+                case 'suggested':
+                    $where .= " AND (
+                        status_meta.meta_value = 'suggested'
+                        OR (
+                            COALESCE(status_meta.meta_value, '') = ''
+                            AND COALESCE(alt_meta.meta_value, '') = ''
+                            AND COALESCE(suggestion_meta.meta_value, '') <> ''
+                        )
+                    )";
+                    break;
+                case 'approved':
+                    $where .= " AND (
+                        status_meta.meta_value = 'approved'
+                        OR (
+                            COALESCE(status_meta.meta_value, '') = ''
+                            AND COALESCE(alt_meta.meta_value, '') <> ''
+                        )
+                    )";
+                    break;
+                default:
+                    $where .= ' AND status_meta.meta_value = %s';
+                    $args[] = $status;
+                    break;
+            }
+        }
+
+        $count_sql = "SELECT COUNT(DISTINCT p.ID) FROM {$posts} AS p {$joins} WHERE {$where}";
+        $total = (int) $wpdb->get_var($wpdb->prepare($count_sql, $args));
+        $pages = $total ? (int) ceil($total / $per_page) : 0;
+        $offset = ($page - 1) * $per_page;
+
+        $id_sql = "SELECT DISTINCT p.ID FROM {$posts} AS p {$joins} WHERE {$where} ORDER BY p.ID DESC LIMIT %d OFFSET %d";
+        $id_args = array_merge($args, [$per_page, $offset]);
+        $page_ids = $wpdb->get_col($wpdb->prepare($id_sql, $id_args));
+
+        $items = [];
+        foreach ($page_ids as $id) {
+            $id = (int) $id;
+            $alt = (string) get_post_meta($id, '_wp_attachment_image_alt', true);
+            $suggestion = (string) get_post_meta($id, '_alt_fixes_suggestion', true);
+            $analysis = get_post_meta($id, '_alt_fixes_analysis', true);
+            $items[] = [
+                'id' => $id,
+                'title' => get_the_title($id),
+                'url' => wp_get_attachment_image_url($id, 'medium'),
+                'alt' => $alt,
+                'suggestion' => $suggestion,
+                'status' => alt_fixes_get_status($id, $alt, $suggestion),
+                'purpose' => is_array($analysis) ? ($analysis['purpose'] ?? null) : null,
+                'confidence' => is_array($analysis) && isset($analysis['confidence']) ? (float) $analysis['confidence'] : null,
+                'review_reason' => is_array($analysis) ? ($analysis['review_reason'] ?? '') : '',
+            ];
+        }
+
+        return rest_ensure_response([
+            'items' => $items,
+            'page' => $page,
+            'per_page' => $per_page,
+            'total' => $total,
+            'pages' => $pages,
+        ]);
+    }
 }
 
 add_action(Alt_Fixes_Queue::HOOK, ['Alt_Fixes_Queue', 'process']);
+add_filter('rest_endpoints', ['Alt_Fixes_Queue', 'replace_scan_endpoint']);
