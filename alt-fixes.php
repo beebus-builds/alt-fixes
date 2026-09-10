@@ -2,14 +2,14 @@
 /**
  * Plugin Name: Alt Fixes AI
  * Description: AI-assisted image alt text suggestions with WordPress context and human approval.
- * Version: 0.4.0
+ * Version: 0.5.0
  * Author: beebus-builds
  * License: GPL-2.0-or-later
  */
 
 if (!defined('ABSPATH')) exit;
 
-define('ALT_FIXES_VERSION', '0.4.0');
+define('ALT_FIXES_VERSION', '0.5.0');
 define('ALT_FIXES_OPTION', 'alt_fixes_settings');
 define('ALT_FIXES_PATH', plugin_dir_path(__FILE__));
 define('ALT_FIXES_URL', plugin_dir_url(__FILE__));
@@ -18,6 +18,16 @@ require_once ALT_FIXES_PATH . 'includes/providers/interface-alt-fixes-provider.p
 require_once ALT_FIXES_PATH . 'includes/providers/class-alt-fixes-openai-provider.php';
 require_once ALT_FIXES_PATH . 'includes/class-alt-fixes-context.php';
 require_once ALT_FIXES_PATH . 'includes/class-alt-fixes-engine.php';
+require_once ALT_FIXES_PATH . 'includes/class-alt-fixes-queue.php';
+
+register_activation_hook(__FILE__, 'alt_fixes_activate');
+function alt_fixes_activate() {
+    Alt_Fixes_Queue::install();
+}
+
+add_action('admin_init', function () {
+    Alt_Fixes_Queue::install();
+});
 
 add_action('admin_menu', function () {
     $hook = add_media_page('Alt Fixes AI', 'Alt Fixes AI', 'manage_options', 'alt-fixes-ai', 'alt_fixes_render_admin');
@@ -53,6 +63,7 @@ add_action('rest_api_init', function () {
         ['/skip/(?P<id>\d+)', 'POST', 'alt_fixes_skip'],
         ['/bulk-suggest', 'POST', 'alt_fixes_bulk_suggest'],
         ['/bulk-approve', 'POST', 'alt_fixes_bulk_approve'],
+        ['/jobs/(?P<job_id>\d+)', 'GET', 'alt_fixes_job_status'],
     ];
     foreach ($routes as [$route, $method, $callback]) {
         register_rest_route('alt-fixes/v1', $route, [
@@ -79,7 +90,7 @@ function alt_fixes_scan(WP_REST_Request $request) {
     $page = max(1, absint($request->get_param('page')) ?: 1);
     $per_page = min(100, max(1, absint($request->get_param('per_page')) ?: 24));
     $status = sanitize_key($request->get_param('status') ?: 'all');
-    $allowed = ['all', 'missing', 'suggested', 'approved', 'skipped'];
+    $allowed = ['all', 'missing', 'queued', 'processing', 'suggested', 'approved', 'skipped', 'failed'];
     if (!in_array($status, $allowed, true)) $status = 'all';
 
     $ids = get_posts([
@@ -167,16 +178,24 @@ function alt_fixes_bulk_suggest(WP_REST_Request $request) {
     $ids = $request->get_param('ids');
     if (!is_array($ids)) return new WP_Error('invalid_ids','IDs must be an array.', ['status'=>400]);
     $ids = array_values(array_unique(array_filter(array_map('absint',$ids))));
-    if (!$ids || count($ids) > 10) return new WP_Error('batch_limit','Select between 1 and 10 images per batch.', ['status'=>400]);
-    $results = [];
-    foreach ($ids as $id) {
-        if (!alt_fixes_validate_image($id)) continue;
-        $result = Alt_Fixes_Engine::suggest($id);
-        if (is_wp_error($result)) { $results[]=['id'=>$id,'success'=>false,'error'=>$result->get_error_message()]; continue; }
-        $suggestion = alt_fixes_store_suggestion($id, $result);
-        $results[]=['id'=>$id,'success'=>true,'suggestion'=>$suggestion];
-    }
-    return rest_ensure_response(['results'=>$results]);
+    if (!$ids || count($ids) > 500) return new WP_Error('batch_limit','Select between 1 and 500 images per queue batch.', ['status'=>400]);
+
+    $job_ids = Alt_Fixes_Queue::enqueue($ids);
+    if (!$job_ids) return new WP_Error('queue_error','No valid images could be queued.', ['status'=>400]);
+
+    return rest_ensure_response([
+        'queued' => count($job_ids),
+        'job_ids' => $job_ids,
+        'progress' => Alt_Fixes_Queue::get_progress($job_ids),
+    ]);
+}
+
+function alt_fixes_job_status(WP_REST_Request $request) {
+    $job_id = absint($request['job_id']);
+    $jobs = Alt_Fixes_Queue::get_jobs([$job_id]);
+    if (!$jobs) return new WP_Error('job_not_found','The requested job was not found.', ['status'=>404]);
+    $progress = Alt_Fixes_Queue::get_progress([$job_id]);
+    return rest_ensure_response(['job' => $jobs[0], 'progress' => $progress]);
 }
 
 function alt_fixes_bulk_approve(WP_REST_Request $request) {
