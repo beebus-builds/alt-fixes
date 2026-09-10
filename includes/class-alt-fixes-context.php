@@ -56,7 +56,7 @@ class Alt_Fixes_Context {
         $sql = $wpdb->prepare(
             "SELECT ID, post_type, post_title FROM {$wpdb->posts}
              WHERE post_status = 'publish'
-             AND post_type NOT IN ('attachment', 'revision, 'nav_menu_item')
+             AND post_type NOT IN ('attachment', 'revision', 'nav_menu_item')
              AND (post_content LIKE %s OR post_content LIKE %s)
              ORDER BY post_date DESC LIMIT 5",
             $like_url,
