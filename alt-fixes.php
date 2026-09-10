@@ -2,16 +2,14 @@
 /**
  * Plugin Name: Alt Fixes AI
  * Description: AI-assisted image alt text suggestions with WordPress context and human approval.
- * Version: 0.3.0
+ * Version: 0.4.0
  * Author: beebus-builds
  * License: GPL-2.0-or-later
  */
 
-if (!defined('ABSPATH')) {
-    exit;
-}
+if (!defined('ABSPATH')) exit;
 
-define('ALT_FIXES_VERSION', '0.3.0');
+define('ALT_FIXES_VERSION', '0.4.0');
 define('ALT_FIXES_OPTION', 'alt_fixes_settings');
 define('ALT_FIXES_PATH', plugin_dir_path(__FILE__));
 define('ALT_FIXES_URL', plugin_dir_url(__FILE__));
@@ -27,21 +25,8 @@ add_action('admin_menu', function () {
 });
 
 function alt_fixes_enqueue_admin_assets() {
-    wp_enqueue_style(
-        'alt-fixes-admin',
-        ALT_FIXES_URL . 'admin/assets/admin.css',
-        [],
-        ALT_FIXES_VERSION
-    );
-
-    wp_enqueue_script(
-        'alt-fixes-admin',
-        ALT_FIXES_URL . 'admin/assets/admin.js',
-        [],
-        ALT_FIXES_VERSION,
-        true
-    );
-
+    wp_enqueue_style('alt-fixes-admin', ALT_FIXES_URL . 'admin/assets/admin.css', [], ALT_FIXES_VERSION);
+    wp_enqueue_script('alt-fixes-admin', ALT_FIXES_URL . 'admin/assets/admin.js', [], ALT_FIXES_VERSION, true);
     wp_localize_script('alt-fixes-admin', 'AltFixesAdmin', [
         'root' => trailingslashit(rest_url('alt-fixes/v1')),
         'nonce' => wp_create_nonce('wp_rest'),
@@ -61,176 +46,153 @@ add_action('admin_init', function () {
 });
 
 add_action('rest_api_init', function () {
-    register_rest_route('alt-fixes/v1', '/scan', [
-        'methods' => 'GET',
-        'permission_callback' => 'alt_fixes_rest_permission',
-        'callback' => 'alt_fixes_scan',
-        'args' => [
-            'page' => ['default' => 1, 'sanitize_callback' => 'absint'],
-            'per_page' => ['default' => 50, 'sanitize_callback' => 'absint'],
-            'status' => ['default' => 'all', 'sanitize_callback' => 'sanitize_key'],
-        ],
-    ]);
-
-    register_rest_route('alt-fixes/v1', '/suggest/(?P<id>\d+)', [
-        'methods' => 'POST',
-        'permission_callback' => 'alt_fixes_rest_permission',
-        'callback' => 'alt_fixes_suggest',
-    ]);
-
-    register_rest_route('alt-fixes/v1', '/approve/(?P<id>\d+)', [
-        'methods' => 'POST',
-        'permission_callback' => 'alt_fixes_rest_permission',
-        'callback' => 'alt_fixes_approve',
-    ]);
-
-    register_rest_route('alt-fixes/v1', '/skip/(?P<id>\d+)', [
-        'methods' => 'POST',
-        'permission_callback' => 'alt_fixes_rest_permission',
-        'callback' => 'alt_fixes_skip',
-    ]);
+    $routes = [
+        ['/scan', 'GET', 'alt_fixes_scan'],
+        ['/suggest/(?P<id>\d+)', 'POST', 'alt_fixes_suggest'],
+        ['/approve/(?P<id>\d+)', 'POST', 'alt_fixes_approve'],
+        ['/skip/(?P<id>\d+)', 'POST', 'alt_fixes_skip'],
+        ['/bulk-suggest', 'POST', 'alt_fixes_bulk_suggest'],
+        ['/bulk-approve', 'POST', 'alt_fixes_bulk_approve'],
+    ];
+    foreach ($routes as [$route, $method, $callback]) {
+        register_rest_route('alt-fixes/v1', $route, [
+            'methods' => $method,
+            'permission_callback' => 'alt_fixes_rest_permission',
+            'callback' => $callback,
+        ]);
+    }
 });
 
 function alt_fixes_rest_permission() {
-    return current_user_can('upload_files');
+    return current_user_can('manage_options');
+}
+
+function alt_fixes_get_status($id, $alt = null, $suggestion = null) {
+    $stored = (string) get_post_meta($id, '_alt_fixes_status', true);
+    if ($stored !== '') return $stored;
+    if ($alt === null) $alt = (string) get_post_meta($id, '_wp_attachment_image_alt', true);
+    if ($suggestion === null) $suggestion = (string) get_post_meta($id, '_alt_fixes_suggestion', true);
+    return trim($alt) === '' ? ($suggestion !== '' ? 'suggested' : 'missing') : 'approved';
 }
 
 function alt_fixes_scan(WP_REST_Request $request) {
     $page = max(1, absint($request->get_param('page')) ?: 1);
-    $per_page = min(100, max(1, absint($request->get_param('per_page')) ?: 50));
+    $per_page = min(100, max(1, absint($request->get_param('per_page')) ?: 24));
     $status = sanitize_key($request->get_param('status') ?: 'all');
-    $allowed_statuses = ['all', 'missing', 'suggested', 'approved', 'skipped'];
+    $allowed = ['all', 'missing', 'suggested', 'approved', 'skipped'];
+    if (!in_array($status, $allowed, true)) $status = 'all';
 
-    if (!in_array($status, $allowed_statuses, true)) {
-        $status = 'all';
+    $ids = get_posts([
+        'post_type' => 'attachment', 'post_mime_type' => 'image', 'post_status' => 'inherit',
+        'posts_per_page' => -1, 'fields' => 'ids', 'orderby' => 'ID', 'order' => 'DESC',
+    ]);
+
+    $filtered = [];
+    foreach ($ids as $id) {
+        $alt = (string) get_post_meta($id, '_wp_attachment_image_alt', true);
+        $suggestion = (string) get_post_meta($id, '_alt_fixes_suggestion', true);
+        $item_status = alt_fixes_get_status($id, $alt, $suggestion);
+        if ($status === 'all' || $item_status === $status) $filtered[] = $id;
     }
 
-    $meta_query = [];
-    if ($status === 'missing') {
-        $meta_query[] = [
-            'relation' => 'OR',
-            ['key' => '_alt_fixes_status', 'compare' => 'NOT EXISTS'],
-            ['key' => '_alt_fixes_status', 'value' => 'missing'],
-        ];
-    } elseif ($status !== 'all') {
-        $meta_query[] = [
-            'key' => '_alt_fixes_status',
-            'value' => $status,
-        ];
-    }
-
-    $query_args = [
-        'post_type' => 'attachment',
-        'post_mime_type' => 'image',
-        'post_status' => 'inherit',
-        'posts_per_page' => $per_page,
-        'paged' => $page,
-        'fields' => 'ids',
-        'orderby' => 'ID',
-        'order' => 'DESC',
-    ];
-
-    if ($meta_query) {
-        $query_args['meta_query'] = $meta_query;
-    }
-
-    $query = new WP_Query($query_args);
+    $total = count($filtered);
+    $pages = $total ? (int) ceil($total / $per_page) : 0;
+    $offset = ($page - 1) * $per_page;
+    $page_ids = array_slice($filtered, $offset, $per_page);
     $items = [];
 
-    foreach ($query->posts as $id) {
+    foreach ($page_ids as $id) {
         $alt = (string) get_post_meta($id, '_wp_attachment_image_alt', true);
         $suggestion = (string) get_post_meta($id, '_alt_fixes_suggestion', true);
         $analysis = get_post_meta($id, '_alt_fixes_analysis', true);
-        $stored_status = (string) get_post_meta($id, '_alt_fixes_status', true);
-
-        if ($stored_status === '') {
-            $stored_status = $alt !== '' ? 'approved' : ($suggestion !== '' ? 'suggested' : 'missing');
-        }
-
         $items[] = [
             'id' => (int) $id,
             'title' => get_the_title($id),
             'url' => wp_get_attachment_image_url($id, 'medium'),
             'alt' => $alt,
             'suggestion' => $suggestion,
-            'analysis' => is_array($analysis) ? $analysis : null,
-            'status' => $stored_status,
-            'needs_alt' => trim($alt) === '',
-            'has_suggestion' => $suggestion !== '',
+            'status' => alt_fixes_get_status($id, $alt, $suggestion),
+            'purpose' => is_array($analysis) ? ($analysis['purpose'] ?? null) : null,
+            'confidence' => is_array($analysis) && isset($analysis['confidence']) ? (float) $analysis['confidence'] : null,
+            'review_reason' => is_array($analysis) ? ($analysis['review_reason'] ?? '') : '',
         ];
     }
 
-    return rest_ensure_response([
-        'items' => $items,
-        'page' => $page,
-        'per_page' => $per_page,
-        'total' => (int) $query->found_posts,
-        'pages' => (int) $query->max_num_pages,
-    ]);
+    return rest_ensure_response(['items'=>$items,'page'=>$page,'per_page'=>$per_page,'total'=>$total,'pages'=>$pages]);
+}
+
+function alt_fixes_validate_image($id) {
+    return get_post_type($id) === 'attachment' && strpos((string) get_post_mime_type($id), 'image/') === 0;
+}
+
+function alt_fixes_store_suggestion($id, $result) {
+    $suggestion = (string) ($result['suggestion'] ?? $result['alt'] ?? '');
+    if ($suggestion !== '') {
+        update_post_meta($id, '_alt_fixes_suggestion', sanitize_text_field($suggestion));
+        update_post_meta($id, '_alt_fixes_status', 'suggested');
+    }
+    if (!empty($result['analysis']) && is_array($result['analysis'])) update_post_meta($id, '_alt_fixes_analysis', $result['analysis']);
+    return $suggestion;
 }
 
 function alt_fixes_suggest(WP_REST_Request $request) {
     $id = absint($request['id']);
-    if (get_post_type($id) !== 'attachment' || strpos((string) get_post_mime_type($id), 'image/') !== 0) {
-        return new WP_Error('invalid_image', 'The requested attachment is not an image.', ['status' => 400]);
-    }
-
+    if (!alt_fixes_validate_image($id)) return new WP_Error('invalid_image','The requested attachment is not an image.', ['status'=>400]);
     $result = Alt_Fixes_Engine::suggest($id);
-    if (is_wp_error($result)) {
-        return $result;
-    }
-
-    $suggestion = (string) ($result['suggestion'] ?? $result['alt'] ?? '');
-    if ($suggestion !== '') {
-        update_post_meta($id, '_alt_fixes_suggestion', $suggestion);
-        update_post_meta($id, '_alt_fixes_status', 'suggested');
-    }
-
-    if (isset($result['analysis']) && is_array($result['analysis'])) {
-        update_post_meta($id, '_alt_fixes_analysis', $result['analysis']);
-    }
-
+    if (is_wp_error($result)) return $result;
+    alt_fixes_store_suggestion($id, $result);
     return rest_ensure_response($result);
 }
 
 function alt_fixes_approve(WP_REST_Request $request) {
     $id = absint($request['id']);
-    if (get_post_type($id) !== 'attachment') {
-        return new WP_Error('invalid_attachment', 'The requested attachment does not exist.', ['status' => 404]);
-    }
-
-    $suggestion = sanitize_text_field($request->get_param('alt'));
-    if ($suggestion === '') {
-        $suggestion = (string) get_post_meta($id, '_alt_fixes_suggestion', true);
-    }
-    if ($suggestion === '') {
-        return new WP_Error('empty_alt', 'No alt text supplied.', ['status' => 400]);
-    }
-
-    update_post_meta($id, '_wp_attachment_image_alt', $suggestion);
+    if (!alt_fixes_validate_image($id)) return new WP_Error('invalid_attachment','The requested attachment does not exist.', ['status'=>404]);
+    $alt = sanitize_text_field($request->get_param('alt'));
+    if ($alt === '') $alt = (string) get_post_meta($id, '_alt_fixes_suggestion', true);
+    if ($alt === '') return new WP_Error('empty_alt','No alt text supplied.', ['status'=>400]);
+    update_post_meta($id, '_wp_attachment_image_alt', $alt);
     update_post_meta($id, '_alt_fixes_status', 'approved');
     delete_post_meta($id, '_alt_fixes_suggestion');
-
-    return rest_ensure_response([
-        'id' => $id,
-        'alt' => $suggestion,
-        'status' => 'approved',
-        'approved' => true,
-    ]);
+    return rest_ensure_response(['id'=>$id,'alt'=>$alt,'status'=>'approved','approved'=>true]);
 }
 
 function alt_fixes_skip(WP_REST_Request $request) {
     $id = absint($request['id']);
-    if (get_post_type($id) !== 'attachment') {
-        return new WP_Error('invalid_attachment', 'The requested attachment does not exist.', ['status' => 404]);
-    }
-
+    if (!alt_fixes_validate_image($id)) return new WP_Error('invalid_image','The requested attachment is not an image.', ['status'=>400]);
     update_post_meta($id, '_alt_fixes_status', 'skipped');
+    return rest_ensure_response(['id'=>$id,'status'=>'skipped']);
+}
 
-    return rest_ensure_response([
-        'id' => $id,
-        'status' => 'skipped',
-    ]);
+function alt_fixes_bulk_suggest(WP_REST_Request $request) {
+    $ids = $request->get_param('ids');
+    if (!is_array($ids)) return new WP_Error('invalid_ids','IDs must be an array.', ['status'=>400]);
+    $ids = array_values(array_unique(array_filter(array_map('absint',$ids))));
+    if (!$ids || count($ids) > 10) return new WP_Error('batch_limit','Select between 1 and 10 images per batch.', ['status'=>400]);
+    $results = [];
+    foreach ($ids as $id) {
+        if (!alt_fixes_validate_image($id)) continue;
+        $result = Alt_Fixes_Engine::suggest($id);
+        if (is_wp_error($result)) { $results[]=['id'=>$id,'success'=>false,'error'=>$result->get_error_message()]; continue; }
+        $suggestion = alt_fixes_store_suggestion($id, $result);
+        $results[]=['id'=>$id,'success'=>true,'suggestion'=>$suggestion];
+    }
+    return rest_ensure_response(['results'=>$results]);
+}
+
+function alt_fixes_bulk_approve(WP_REST_Request $request) {
+    $items = $request->get_param('items');
+    if (!is_array($items) || !$items) return new WP_Error('invalid_items','Items must be supplied.', ['status'=>400]);
+    if (count($items) > 25) return new WP_Error('batch_limit','Approve at most 25 images per batch.', ['status'=>400]);
+    $results=[];
+    foreach ($items as $item) {
+        $id=absint($item['id'] ?? 0); $alt=sanitize_text_field($item['alt'] ?? '');
+        if (!alt_fixes_validate_image($id) || $alt==='') continue;
+        update_post_meta($id,'_wp_attachment_image_alt',$alt);
+        update_post_meta($id,'_alt_fixes_status','approved');
+        delete_post_meta($id,'_alt_fixes_suggestion');
+        $results[]=['id'=>$id,'approved'=>true,'alt'=>$alt];
+    }
+    return rest_ensure_response(['results'=>$results]);
 }
 
 function alt_fixes_render_admin() {
@@ -242,18 +204,9 @@ function alt_fixes_render_admin() {
         <form method="post" action="options.php">
             <?php settings_fields('alt_fixes'); ?>
             <table class="form-table">
-                <tr>
-                    <th>Provider</th>
-                    <td><select name="<?php echo esc_attr(ALT_FIXES_OPTION); ?>[provider]"><option value="openai">OpenAI</option></select></td>
-                </tr>
-                <tr>
-                    <th>API key</th>
-                    <td><input type="password" class="regular-text" name="<?php echo esc_attr(ALT_FIXES_OPTION); ?>[api_key]" value="<?php echo esc_attr($settings['api_key'] ?? ''); ?>" autocomplete="off"></td>
-                </tr>
-                <tr>
-                    <th>Vision model</th>
-                    <td><input type="text" class="regular-text" name="<?php echo esc_attr(ALT_FIXES_OPTION); ?>[model]" value="<?php echo esc_attr($settings['model'] ?? 'gpt-5.6-luna'); ?>"></td>
-                </tr>
+                <tr><th>Provider</th><td><select name="<?php echo esc_attr(ALT_FIXES_OPTION); ?>[provider]"><option value="openai">OpenAI</option></select></td></tr>
+                <tr><th>API key</th><td><input type="password" class="regular-text" name="<?php echo esc_attr(ALT_FIXES_OPTION); ?>[api_key]" value="<?php echo esc_attr($settings['api_key'] ?? ''); ?>" autocomplete="off"></td></tr>
+                <tr><th>Vision model</th><td><input type="text" class="regular-text" name="<?php echo esc_attr(ALT_FIXES_OPTION); ?>[model]" value="<?php echo esc_attr($settings['model'] ?? 'gpt-5.6-luna'); ?>"></td></tr>
             </table>
             <?php submit_button('Save settings'); ?>
         </form>
