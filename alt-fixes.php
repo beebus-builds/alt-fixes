@@ -2,14 +2,14 @@
 /**
  * Plugin Name: Alt Fixes AI
  * Description: AI-assisted image alt text suggestions with WordPress context and human approval.
- * Version: 0.6.1
+ * Version: 0.7.0
  * Author: beebus-builds
  * License: GPL-2.0-or-later
  */
 
 if (!defined('ABSPATH')) exit;
 
-define('ALT_FIXES_VERSION', '0.6.1');
+define('ALT_FIXES_VERSION', '0.7.0');
 define('ALT_FIXES_OPTION', 'alt_fixes_settings');
 define('ALT_FIXES_PATH', plugin_dir_path(__FILE__));
 define('ALT_FIXES_URL', plugin_dir_url(__FILE__));
@@ -54,11 +54,11 @@ function alt_fixes_scan(WP_REST_Request $request){
     $ids=get_posts(['post_type'=>'attachment','post_mime_type'=>'image','post_status'=>'inherit','posts_per_page'=>-1,'fields'=>'ids','orderby'=>'ID','order'=>'DESC']);$filtered=[];
     foreach($ids as $id){$alt=(string)get_post_meta($id,'_wp_attachment_image_alt',true);$suggestion=(string)get_post_meta($id,'_alt_fixes_suggestion',true);if($status==='all'||alt_fixes_get_status($id,$alt,$suggestion)===$status)$filtered[]=$id;}
     $total=count($filtered);$pages=$total?(int)ceil($total/$per_page):0;$page_ids=array_slice($filtered,($page-1)*$per_page,$per_page);$items=[];
-    foreach($page_ids as $id){$alt=(string)get_post_meta($id,'_wp_attachment_image_alt',true);$suggestion=(string)get_post_meta($id,'_alt_fixes_suggestion',true);$analysis=get_post_meta($id,'_alt_fixes_analysis',true);$items[]=['id'=>(int)$id,'title'=>get_the_title($id),'url'=>wp_get_attachment_image_url($id,'medium'),'alt'=>$alt,'suggestion'=>$suggestion,'status'=>alt_fixes_get_status($id,$alt,$suggestion),'purpose'=>is_array($analysis)?($analysis['purpose']??null):null,'confidence'=>is_array($analysis)&&isset($analysis['confidence'])?(float)$analysis['confidence']:null,'review_reason'=>is_array($analysis)?($analysis['review_reason']??''):''];}
+    foreach($page_ids as $id){$alt=(string)get_post_meta($id,'_wp_attachment_image_alt',true);$suggestion=(string)get_post_meta($id,'_alt_fixes_suggestion',true);$analysis=get_post_meta($id,'_alt_fixes_analysis',true);$items[]=['id'=>(int)$id,'title'=>get_the_title($id),'url'=>wp_get_attachment_image_url($id,'medium'),'alt'=>$alt,'suggestion'=>$suggestion,'status'=>alt_fixes_get_status($id,$alt,$suggestion),'purpose'=>is_array($analysis)?($analysis['purpose']??null):null,'decorative'=>is_array($analysis)&&!empty($analysis['decorative']),'confidence'=>is_array($analysis)&&isset($analysis['confidence'])?(float)$analysis['confidence']:null,'review_reason'=>is_array($analysis)?($analysis['review_reason']??''):'','evidence'=>is_array($analysis)?($analysis['evidence']??''):'','model'=>is_array($analysis)?($analysis['model']??''):'' ];}
     return rest_ensure_response(['items'=>$items,'page'=>$page,'per_page'=>$per_page,'total'=>$total,'pages'=>$pages]);
 }
 function alt_fixes_validate_image($id){return get_post_type($id)==='attachment'&&strpos((string)get_post_mime_type($id),'image/')===0;}
-function alt_fixes_store_suggestion($id,$result){$suggestion=(string)($result['suggestion']??$result['alt']??'');if($suggestion!==''){update_post_meta($id,'_alt_fixes_suggestion',sanitize_text_field($suggestion));update_post_meta($id,'_alt_fixes_status','suggested');}if(!empty($result['analysis'])&&is_array($result['analysis']))update_post_meta($id,'_alt_fixes_analysis',$result['analysis']);return $suggestion;}
+function alt_fixes_store_suggestion($id,$result){$suggestion=(string)($result['suggestion']??$result['alt']??'');if($suggestion!==''||(!empty($result['analysis']['decorative']))){update_post_meta($id,'_alt_fixes_suggestion',sanitize_text_field($suggestion));update_post_meta($id,'_alt_fixes_status','suggested');}if(!empty($result['analysis'])&&is_array($result['analysis']))update_post_meta($id,'_alt_fixes_analysis',$result['analysis']);return $suggestion;}
 function alt_fixes_suggest(WP_REST_Request $request){$id=absint($request['id']);if(!alt_fixes_validate_image($id))return new WP_Error('invalid_image','The requested attachment is not an image.',['status'=>400]);$result=Alt_Fixes_Engine::suggest($id);if(is_wp_error($result))return $result;alt_fixes_store_suggestion($id,$result);return rest_ensure_response($result);}
 function alt_fixes_approve(WP_REST_Request $request){$id=absint($request['id']);if(!alt_fixes_validate_image($id))return new WP_Error('invalid_attachment','The requested attachment does not exist.',['status'=>404]);$alt=sanitize_text_field($request->get_param('alt'));if($alt==='')$alt=(string)get_post_meta($id,'_alt_fixes_suggestion',true);if($alt==='')return new WP_Error('empty_alt','No alt text supplied.',['status'=>400]);update_post_meta($id,'_wp_attachment_image_alt',$alt);update_post_meta($id,'_alt_fixes_status','approved');delete_post_meta($id,'_alt_fixes_suggestion');return rest_ensure_response(['id'=>$id,'alt'=>$alt,'status'=>'approved','approved'=>true]);}
 function alt_fixes_skip(WP_REST_Request $request){$id=absint($request['id']);if(!alt_fixes_validate_image($id))return new WP_Error('invalid_image','The requested attachment is not an image.',['status'=>400]);update_post_meta($id,'_alt_fixes_status','skipped');return rest_ensure_response(['id'=>$id,'status'=>'skipped']);}
