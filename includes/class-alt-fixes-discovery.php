@@ -5,13 +5,13 @@ if (!defined('ABSPATH')) exit;
 class Alt_Fixes_Discovery {
     public static function scan($page=1,$per_page=100) {
         $page=max(1,absint($page)); $per_page=min(500,max(1,absint($per_page)));
-        $posts=get_posts(['post_type'=>self::post_types(),'post_status'=>'publish','posts_per_page'=>-1,'fields'=>'ids','orderby'=>'ID','order'=>'DESC']);
+        $posts=get_posts(['post_type'=>self::post_types(),'post_status'=>['publish','inherit'],'posts_per_page'=>-1,'fields'=>'ids','orderby'=>'ID','order'=>'DESC']);
         $found=[];
         foreach($posts as $post_id){
             $post=get_post($post_id); if(!$post) continue;
             $html=(string)$post->post_content;
             foreach(self::extract_urls($html) as $url) self::add($found,$url,$post_id,'content');
-            foreach(self::builder_meta($post_id) as $blob) foreach(self::extract_urls($blob) as $url) self::add($found,$url,$post_id,'builder-data');
+            foreach(self::all_meta_blobs($post_id) as $blob) foreach(self::extract_urls($blob) as $url) self::add($found,$url,$post_id,'builder-data');
         }
         $attachments=get_posts(['post_type'=>'attachment','post_mime_type'=>'image','post_status'=>'inherit','posts_per_page'=>-1,'fields'=>'ids']);
         foreach($attachments as $id){$url=wp_get_attachment_url($id);if($url&&isset($found[self::normalize($url)]))$found[self::normalize($url)]['attachment_id']=$id;}
@@ -19,12 +19,21 @@ class Alt_Fixes_Discovery {
         $items=array_values($found); usort($items,function($a,$b){return strcasecmp($a['url'],$b['url']);});
         $total=count($items); return ['items'=>array_slice($items,($page-1)*$per_page,$per_page),'page'=>$page,'per_page'=>$per_page,'total'=>$total,'pages'=>$total?(int)ceil($total/$per_page):0];
     }
-    public static function post_types(){ $types=get_post_types(['public'=>true],'names'); foreach(['attachment','revision','nav_menu_item'] as $bad) unset($types[$bad]); return array_values($types); }
-    private static function builder_meta($post_id){
+    public static function post_types(){
+        $types=get_post_types([], 'objects'); $out=[];
+        foreach($types as $name=>$type){
+            if(in_array($name,['attachment','revision','nav_menu_item','custom_css','customize_changeset'],true)) continue;
+            if($type->public||$type->publicly_queryable||in_array($name,['wp_template','wp_template_part','elementor_library','fl-builder-template','avada_portfolio','fusion_element'],true)) $out[]=$name;
+        }
+        return $out;
+    }
+    private static function all_meta_blobs($post_id){
         $out=[]; $meta=get_post_meta($post_id);
-        foreach((array)$meta as $key=>$values){
-            $key_l=strtolower((string)$key);
-            if(strpos($key_l,'elementor')!==false||strpos($key_l,'divi')!==false||strpos($key_l,'avada')!==false||strpos($key_l,'bricks')!==false||strpos($key_l,'wpbakery')!==false||strpos($key_l,'vc_')===0||strpos($key_l,'fl_builder')!==false||strpos($key_l,'oxygen')!==false||strpos($key_l,'beaver')!==false||strpos($key_l,'fusion')!==false||strpos($key_l,'kadence')!==false||strpos($key_l,'breakdance')!==false||strpos($key_l,'spectra')!==false||strpos($key_l,'generateblocks')!==false){foreach((array)$values as $value) if(is_scalar($value)) $out[]=(string)$value;}
+        foreach((array)$meta as $values) foreach((array)$values as $value){
+            if(!is_scalar($value)) continue;
+            $value=(string)$value;
+            if($value===''||strlen($value)>3000000) continue;
+            if(preg_match('/(?:https?:\/\/|\/wp-content\/|\.(?:jpe?g|png|gif|webp|avif|svg|bmp|tiff?|ico))/i',$value)) $out[]=$value;
         }
         return $out;
     }
