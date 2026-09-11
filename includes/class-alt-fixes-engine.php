@@ -25,7 +25,7 @@ class Alt_Fixes_Engine {
         if(preg_match('/^(?:an? |the )?(?:image|picture|photo|graphic)\s+(?:of|showing)\b/i',$alt)){$flags[]='generic_opening';$score-=10;$reasons[]='Alt text starts with a redundant image label.';}
         $words=preg_split('/\s+/',trim($alt));$word_count=count(array_filter($words));if($word_count<3){$flags[]='too_short';$score-=15;$reasons[]='Alt text is too short to establish the image purpose.';}elseif($word_count>25){$flags[]='excessive_length';$score-=10;$reasons[]='Alt text is longer than a concise alternative should normally be.';}
         if(in_array($purpose,['chart','diagram','complex'],true)){$flags[]='complex_visual';$score-=5;$reasons[]='Complex visual requires a separate detailed text equivalent.';}
-        if($confidence<.85){$flags[]='low_confidence';$score-=10;$reasons[]='Model confidence is below the automatic approval threshold.'}
+        if($confidence<.85){$flags[]='low_confidence';$score-=10;$reasons[]='Model confidence is below the automatic approval threshold.';}
         if(!empty($analysis['ocr_text'])&&in_array($purpose,['text','logo','chart','diagram','screenshot'],true)&&strlen($analysis['ocr_text'])>0){$flags[]='ocr_present';}
         if(in_array('unreadable_text',$flags,true)||in_array('ambiguous_purpose',$flags,true)||in_array('hallucination_risk',$flags,true)||in_array('context_conflict',$flags,true)){$score-=10;$reasons[]='The analysis contains a high-risk quality flag.';}
         $score=max(0,min(100,$score));$analysis['quality_score']=$score;$analysis['quality_flags']=array_values(array_unique($flags));
