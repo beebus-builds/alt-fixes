@@ -21,7 +21,7 @@ class Alt_Fixes_Engine {
     public static function finalize_browser($attachment_id,$alt,$caption,$ocr_text='',array $context=[],$purpose='informative',$purpose_confidence=0.72,array $purpose_flags=[]) {
         $attachment_id=absint($attachment_id);$alt=sanitize_text_field($alt);$caption=sanitize_text_field($caption);$ocr_text=sanitize_textarea_field($ocr_text);$purpose=sanitize_key($purpose);$purpose_confidence=max(0,min(1,(float)$purpose_confidence));
         if($purpose==='decorative')$alt='';
-        if($alt===''&&!$purpose==='decorative')return new WP_Error('empty_suggestion','The local vision model returned no usable alt text.',['status'=>422]);
+        if($alt==='' && $purpose!=='decorative')return new WP_Error('empty_suggestion','The local vision model returned no usable alt text.',['status'=>422]);
         if(!$context)$context=Alt_Fixes_Context::for_attachment($attachment_id);
         if(empty($context['learning']))$context['learning']=Alt_Fixes_Learning::for_prompt($context);
         $flags=array_values(array_unique(array_merge(['browser_caption'],array_map('sanitize_key',$purpose_flags))));
