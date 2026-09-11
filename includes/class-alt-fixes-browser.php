@@ -28,15 +28,27 @@ class Alt_Fixes_Browser {
         if($caption==='') return new WP_Error('empty_caption','The local vision model did not return a caption.',['status'=>422]);
         $context=Alt_Fixes_Context::for_attachment($id);$context['learning']=Alt_Fixes_Learning::for_prompt($context);
         $context['browser_purpose']=['purpose'=>$purpose,'confidence'=>$purpose_confidence,'flags'=>$purpose_flags,'scores'=>$purpose_scores];
+        $override=self::context_purpose_override($context,$purpose);
+        if($override!==''){$purpose=$override;$purpose_flags[]='context_purpose_override';$purpose_confidence=max($purpose_confidence,.90);$context['browser_purpose']['context_override']=$override;}
         $alt=self::caption_to_alt($caption,$ocr_text,$context,$purpose);
         $result=Alt_Fixes_Engine::finalize_browser($id,$alt,$caption,$ocr_text,$context,$purpose,$purpose_confidence,$purpose_flags);
         if(is_wp_error($result)) return $result;
         return rest_ensure_response($result);
     }
+    private static function context_purpose_override(array $context,$purpose) {
+        foreach((array)($context['usages']??[]) as $usage){
+            $signals=$usage['signals']??[];
+            if(!empty($signals['linked'])) return 'functional';
+            if(!empty($signals['class_hint'])&&$signals['class_hint']==='logo') return 'logo';
+        }
+        $text=strtolower(implode(' ',array_filter([$context['attachment_title']??'',$context['caption']??'',($context['parent']['title']??''),implode(' ',(array)($context['parent']['headings']??[]))])));
+        if(preg_match('/\b(logo|brand mark|company logo|wordmark)\b/',$text)) return 'logo';
+        return '';
+    }
     private static function context_phrase(array $context,$purpose) {
         $parent=$context['parent']??[];$values=[$context['attachment_title']??'',$context['caption']??'',$parent['title']??''];
         foreach((array)($context['usages']??[]) as $usage){$values[]=$usage['title']??'';foreach((array)($usage['headings']??[]) as $heading)$values[]=$heading;}
-        foreach($values as $value){$value=trim(preg_replace('/\s+/',' ',(string)$value));if($value==='')continue;if(in_array($purpose,['logo','product'],true))return $value;if($purpose==='functional' && strlen($value)<=80)return $value;}
+        foreach($values as $value){$value=trim(preg_replace('/\s+/',' ',(string)$value));if($value==='')continue;if(in_array($purpose,['logo','product'],true))return $value;if($purpose==='functional'&&strlen($value)<=80)return $value;}
         return '';
     }
     private static function caption_to_alt($caption,$ocr_text,array $context,$purpose) {
@@ -45,16 +57,14 @@ class Alt_Fixes_Browser {
         $alt=preg_replace('/^(?:a|an|the)\s+(?:photo|photograph|picture|image|graphic)\s+(?:of|showing)\s+/i','',$alt);
         $alt=preg_replace('/^(?:a|an|the)\s+/i','',$alt);$alt=trim($alt," \t\n\r\0\x0B.,;:-");
         $context_phrase=self::context_phrase($context,$purpose);
-        if($context_phrase!=='' && $purpose==='logo' && !self::contains_phrase($alt,$context_phrase)) $alt=$context_phrase.' logo'.($alt!==''?' — '.$alt:'');
-        if($context_phrase!=='' && $purpose==='product' && !self::contains_phrase($alt,$context_phrase)) $alt=$context_phrase.($alt!==''?' — '.$alt:'');
+        if($context_phrase!==''&&$purpose==='logo'&&!self::contains_phrase($alt,$context_phrase))$alt=$context_phrase.' logo'.($alt!==''?' — '.$alt:'');
+        if($context_phrase!==''&&$purpose==='product'&&!self::contains_phrase($alt,$context_phrase))$alt=$context_phrase.($alt!==''?' — '.$alt:'');
         $ocr=trim(preg_replace('/\s+/',' ',$ocr_text));
-        if($ocr!=='' && self::caption_needs_ocr($alt,$ocr)) $alt=$alt!==''?$alt.' — '.mb_substr($ocr,0,80):mb_substr($ocr,0,80);
-        foreach((array)(($context['learning']['site_rules']??[])['avoid_terms']??[]) as $term) $alt=preg_replace('/\b'.preg_quote($term,'/').'\b/i','',$alt);
+        if($ocr!==''&&self::caption_needs_ocr($alt,$ocr))$alt=$alt!==''?$alt.' — '.mb_substr($ocr,0,80):mb_substr($ocr,0,80);
+        foreach((array)(($context['learning']['site_rules']??[])['avoid_terms']??[]) as $term)$alt=preg_replace('/\b'.preg_quote($term,'/').'\b/i','',$alt);
         $alt=trim(preg_replace('/\s+/',' ',$alt));$words=preg_split('/\s+/',$alt,-1,PREG_SPLIT_NO_EMPTY);if(count($words)>25)$alt=implode(' ',array_slice($words,0,25));if($alt!=='')$alt=strtoupper(substr($alt,0,1)).substr($alt,1);return $alt;
     }
-    private static function contains_phrase($text,$phrase) { $text=strtolower(trim($text));$phrase=strtolower(trim($phrase));return $phrase!==''&&strpos($text,$phrase)!==false; }
-    private static function caption_needs_ocr($caption,$ocr) {
-        if($ocr==='') return false;if(strlen($caption)<12)return true;if(preg_match('/\b(?:text|sign|logo|banner|screenshot|poster|screen|website|menu|document|receipt|label|headline|title)\b/i',$caption))return true;return (bool)preg_match('/\b(?:https?:\/\/|www\.|\.com\b|\.org\b|\.net\b|[A-Z]{2,}\d{2,})/i',$ocr);
-    }
+    private static function contains_phrase($text,$phrase){$text=strtolower(trim($text));$phrase=strtolower(trim($phrase));return $phrase!==''&&strpos($text,$phrase)!==false;}
+    private static function caption_needs_ocr($caption,$ocr){if($ocr==='')return false;if(strlen($caption)<12)return true;if(preg_match('/\b(?:text|sign|logo|banner|screenshot|poster|screen|website|menu|document|receipt|label|headline|title)\b/i',$caption))return true;return(bool)preg_match('/\b(?:https?:\/\/|www\.|\.com\b|\.org\b|\.net\b|[A-Z]{2,}\d{2,})/i',$ocr);}
 }
 Alt_Fixes_Browser::boot();
