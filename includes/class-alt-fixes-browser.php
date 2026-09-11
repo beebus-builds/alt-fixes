@@ -32,6 +32,7 @@ class Alt_Fixes_Browser {
             'context' => Alt_Fixes_Context::for_attachment($id),
             'provider' => 'browser-local',
             'model' => 'Xenova/vit-gpt2-image-captioning',
+            'purpose_model' => 'Xenova/clip-vit-base-patch32',
             'ocr_model' => 'Xenova/trocr-small-printed',
         ]);
     }
@@ -43,19 +44,35 @@ class Alt_Fixes_Browser {
         }
         $caption = sanitize_text_field($request->get_param('caption') ?: '');
         $ocr_text = sanitize_textarea_field($request->get_param('ocr_text') ?: '');
+        $purpose = sanitize_key($request->get_param('purpose') ?: 'informative');
+        $allowed_purposes = ['decorative','logo','product','chart','text','functional','informative'];
+        if (!in_array($purpose, $allowed_purposes, true)) $purpose = 'informative';
+        $purpose_confidence = max(0, min(1, (float)$request->get_param('purpose_confidence')));
+        $purpose_flags = array_values(array_filter(array_map('sanitize_key', (array)$request->get_param('purpose_flags'))));
+        $purpose_scores = [];
+        foreach ((array)$request->get_param('purpose_scores') as $score) {
+            if (is_array($score)) $purpose_scores[] = ['label' => sanitize_text_field($score['label'] ?? ''), 'score' => max(0, min(1, (float)($score['score'] ?? 0)))];
+        }
         if ($caption === '') {
             return new WP_Error('empty_caption', 'The local vision model did not return a caption.', ['status' => 422]);
         }
 
         $context = Alt_Fixes_Context::for_attachment($id);
         $context['learning'] = Alt_Fixes_Learning::for_prompt($context);
-        $alt = self::caption_to_alt($caption, $ocr_text, $context);
-        $result = Alt_Fixes_Engine::finalize_browser($id, $alt, $caption, $ocr_text, $context);
+        $context['browser_purpose'] = [
+            'purpose' => $purpose,
+            'confidence' => $purpose_confidence,
+            'flags' => $purpose_flags,
+            'scores' => $purpose_scores,
+        ];
+        $alt = self::caption_to_alt($caption, $ocr_text, $context, $purpose);
+        $result = Alt_Fixes_Engine::finalize_browser($id, $alt, $caption, $ocr_text, $context, $purpose, $purpose_confidence, $purpose_flags);
         if (is_wp_error($result)) return $result;
         return rest_ensure_response($result);
     }
 
-    private static function caption_to_alt($caption, $ocr_text, array $context) {
+    private static function caption_to_alt($caption, $ocr_text, array $context, $purpose) {
+        if ($purpose === 'decorative') return '';
         $alt = trim(preg_replace('/\s+/', ' ', $caption));
         $alt = preg_replace('/^(?:a|an|the)\s+(?:photo|photograph|picture|image|graphic)\s+(?:of|showing)\s+/i', '', $alt);
         $alt = preg_replace('/^(?:a|an|the)\s+/i', '', $alt);
