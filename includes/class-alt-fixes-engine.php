@@ -38,25 +38,29 @@ class Alt_Fixes_Engine {
             return $result;
         }
 
+        $analysis = [
+            'purpose' => sanitize_key($result['purpose'] ?? 'informative'),
+            'decorative' => !empty($result['decorative']),
+            'confidence' => isset($result['confidence']) ? max(0, min(1, (float) $result['confidence'])) : null,
+            'review_reason' => sanitize_text_field($result['review_reason'] ?? ''),
+            'evidence' => sanitize_text_field($result['evidence'] ?? ''),
+            'model' => sanitize_text_field($result['model'] ?? ''),
+            'generated_at' => current_time('mysql', true),
+        ];
+
         $alt = sanitize_text_field($result['alt'] ?? '');
-        if ($alt === '') {
+        $is_decorative = !empty($analysis['decorative']);
+        if ($alt === '' && !$is_decorative) {
             return new WP_Error('empty_suggestion', 'The AI provider returned an empty suggestion.', ['status' => 502]);
         }
 
         update_post_meta($attachment_id, '_alt_fixes_suggestion', $alt);
-        update_post_meta($attachment_id, '_alt_fixes_analysis', [
-            'purpose' => sanitize_key($result['purpose'] ?? 'informative'),
-            'decorative' => !empty($result['decorative']),
-            'confidence' => isset($result['confidence']) ? (float) $result['confidence'] : null,
-            'review_reason' => sanitize_text_field($result['review_reason'] ?? ''),
-            'model' => sanitize_text_field($result['model'] ?? ''),
-            'generated_at' => current_time('mysql', true),
-        ]);
+        update_post_meta($attachment_id, '_alt_fixes_analysis', $analysis);
 
         return [
             'id' => $attachment_id,
             'suggestion' => $alt,
-            'analysis' => get_post_meta($attachment_id, '_alt_fixes_analysis', true),
+            'analysis' => $analysis,
             'context' => $context,
         ];
     }
