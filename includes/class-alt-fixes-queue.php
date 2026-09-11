@@ -11,7 +11,12 @@ class Alt_Fixes_Queue {
     const TABLE_SUFFIX = 'alt_fixes_jobs';
     const GROUP = 'alt-fixes-ai';
     const HOOK = 'alt_fixes_process_job';
+    const MAINTENANCE_HOOK = 'alt_fixes_queue_maintenance';
+    const CRON_HOOK = 'alt_fixes_queue_maintenance_cron';
+    const DB_VERSION = '1.1.0';
     const MAX_ATTEMPTS = 3;
+    const STALE_TIMEOUT = 900;
+    const MAINTENANCE_INTERVAL = 300;
 
     public static function table_name() {
         global $wpdb;
@@ -21,6 +26,11 @@ class Alt_Fixes_Queue {
     public static function install() {
         global $wpdb;
 
+        $installed = get_option('alt_fixes_db_version');
+        if ($installed === self::DB_VERSION) {
+            return;
+        }
+
         $table = self::table_name();
         $charset = $wpdb->get_charset_collate();
 
@@ -28,19 +38,46 @@ class Alt_Fixes_Queue {
             id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
             attachment_id bigint(20) unsigned NOT NULL,
             status varchar(20) NOT NULL DEFAULT 'queued',
+            active tinyint(1) unsigned NOT NULL DEFAULT 1,
             attempts tinyint(3) unsigned NOT NULL DEFAULT 0,
             error text NULL,
             created_at datetime NOT NULL,
             started_at datetime NULL,
             completed_at datetime NULL,
-            PRIMARY KEY (id),
+            PRIMARY KEY  (id),
             KEY attachment_id (attachment_id),
             KEY status (status),
-            KEY status_attachment (status, attachment_id)
+            KEY status_attachment (status, attachment_id),
+            UNIQUE KEY attachment_active (attachment_id, active)
         ) {$charset};";
 
         require_once ABSPATH . 'wp-admin/includes/upgrade.php';
         dbDelta($sql);
+        update_option('alt_fixes_db_version', self::DB_VERSION, false);
+    }
+
+    public static function schedule_maintenance() {
+        if (function_exists('as_schedule_recurring_action')) {
+            if (function_exists('as_has_scheduled_action')) {
+                if (!as_has_scheduled_action(self::MAINTENANCE_HOOK, [], self::GROUP)) {
+                    as_schedule_recurring_action(time() + self::MAINTENANCE_INTERVAL, self::MAINTENANCE_INTERVAL, self::MAINTENANCE_HOOK, [], self::GROUP, true);
+                }
+            } elseif (!function_exists('as_next_scheduled_action') || !as_next_scheduled_action(self::MAINTENANCE_HOOK, [], self::GROUP)) {
+                as_schedule_recurring_action(time() + self::MAINTENANCE_INTERVAL, self::MAINTENANCE_INTERVAL, self::MAINTENANCE_HOOK, [], self::GROUP, true);
+            }
+            return;
+        }
+
+        if (!wp_next_scheduled(self::CRON_HOOK)) {
+            wp_schedule_event(time() + self::MAINTENANCE_INTERVAL, 'five_minutes', self::CRON_HOOK);
+        }
+    }
+
+    public static function unschedule_maintenance() {
+        if (function_exists('as_unschedule_all_actions')) {
+            as_unschedule_all_actions(self::MAINTENANCE_HOOK, [], self::GROUP);
+        }
+        wp_clear_scheduled_hook(self::CRON_HOOK);
     }
 
     public static function enqueue($attachment_ids) {
@@ -55,26 +92,28 @@ class Alt_Fixes_Queue {
                 continue;
             }
 
-            $existing = $wpdb->get_var($wpdb->prepare(
-                "SELECT id FROM " . self::table_name() . " WHERE attachment_id = %d AND status IN ('queued','processing') ORDER BY id DESC LIMIT 1",
-                $attachment_id
-            ));
-
-            if ($existing) {
-                $job_ids[] = (int) $existing;
-                continue;
-            }
-
-            $wpdb->insert(
+            $inserted = $wpdb->insert(
                 self::table_name(),
                 [
                     'attachment_id' => $attachment_id,
                     'status' => 'queued',
+                    'active' => 1,
                     'attempts' => 0,
                     'created_at' => current_time('mysql', true),
                 ],
-                ['%d', '%s', '%d', '%s']
+                ['%d', '%s', '%d', '%d', '%s']
             );
+
+            if (!$inserted) {
+                $existing = $wpdb->get_var($wpdb->prepare(
+                    "SELECT id FROM " . self::table_name() . " WHERE attachment_id = %d AND active = 1 ORDER BY id DESC LIMIT 1",
+                    $attachment_id
+                ));
+                if ($existing) {
+                    $job_ids[] = (int) $existing;
+                }
+                continue;
+            }
 
             $job_id = (int) $wpdb->insert_id;
             if (!$job_id) {
@@ -108,34 +147,37 @@ class Alt_Fixes_Queue {
         global $wpdb;
 
         $table = self::table_name();
-        $job = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$table} WHERE id = %d", absint($job_id)), ARRAY_A);
+        $job_id = absint($job_id);
+        if (!$job_id) {
+            return;
+        }
+
+        // Atomically claim only queued jobs. This prevents two workers from
+        // processing the same image at the same time.
+        $now = current_time('mysql', true);
+        $claimed = $wpdb->query($wpdb->prepare(
+            "UPDATE {$table}
+             SET status = 'processing', attempts = attempts + 1, started_at = %s, error = NULL
+             WHERE id = %d AND status = 'queued'",
+            $now,
+            $job_id
+        ));
+
+        if (1 !== (int) $claimed) {
+            return;
+        }
+
+        $job = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$table} WHERE id = %d", $job_id), ARRAY_A);
         if (!$job) {
             return;
         }
 
-        if (in_array($job['status'], ['completed', 'skipped'], true)) {
-            return;
-        }
-
         $attachment_id = (int) $job['attachment_id'];
-        $attempts = (int) $job['attempts'] + 1;
-
-        $wpdb->update(
-            $table,
-            [
-                'status' => 'processing',
-                'attempts' => $attempts,
-                'started_at' => current_time('mysql', true),
-                'error' => null,
-            ],
-            ['id' => (int) $job['id']],
-            ['%s', '%d', '%s', '%s'],
-            ['%d']
-        );
+        $attempts = (int) $job['attempts'];
         update_post_meta($attachment_id, '_alt_fixes_status', 'processing');
 
         if (!alt_fixes_validate_image($attachment_id)) {
-            self::fail($job['id'], 'The attachment is no longer a valid image.', $attempts, false);
+            self::fail($job_id, 'The attachment is no longer a valid image.', $attempts, false);
             return;
         }
 
@@ -143,7 +185,7 @@ class Alt_Fixes_Queue {
         if (is_wp_error($result)) {
             $message = $result->get_error_message();
             $retry = $attempts < self::MAX_ATTEMPTS;
-            self::fail($job['id'], $message, $attempts, $retry);
+            self::fail($job_id, $message, $attempts, $retry);
             return;
         }
 
@@ -152,12 +194,13 @@ class Alt_Fixes_Queue {
             $table,
             [
                 'status' => 'completed',
+                'active' => 0,
                 'error' => null,
                 'completed_at' => current_time('mysql', true),
             ],
-            ['id' => (int) $job['id']],
-            ['%s', '%s', '%s'],
-            ['%d']
+            ['id' => $job_id, 'status' => 'processing'],
+            ['%s', '%d', '%s', '%s'],
+            ['%d', '%s']
         );
     }
 
@@ -171,9 +214,9 @@ class Alt_Fixes_Queue {
             $wpdb->update(
                 $table,
                 ['status' => 'queued', 'error' => $message],
-                ['id' => (int) $job_id],
+                ['id' => (int) $job_id, 'status' => 'processing'],
                 ['%s', '%s'],
-                ['%d']
+                ['%d', '%s']
             );
             $delay = min(300, 30 * (2 ** max(0, $attempts - 1)));
             self::schedule($job_id, $delay);
@@ -182,14 +225,70 @@ class Alt_Fixes_Queue {
 
         $wpdb->update(
             $table,
-            ['status' => 'failed', 'error' => $message, 'completed_at' => current_time('mysql', true)],
-            ['id' => (int) $job_id],
-            ['%s', '%s', '%s'],
-            ['%d']
+            [
+                'status' => 'failed',
+                'active' => 0,
+                'error' => $message,
+                'completed_at' => current_time('mysql', true),
+            ],
+            ['id' => (int) $job_id, 'status' => 'processing'],
+            ['%s', '%d', '%s', '%s'],
+            ['%d', '%s']
         );
         $attachment_id = (int) $wpdb->get_var($wpdb->prepare("SELECT attachment_id FROM {$table} WHERE id = %d", (int) $job_id));
         if ($attachment_id) {
             update_post_meta($attachment_id, '_alt_fixes_status', 'failed');
+        }
+    }
+
+    /**
+     * Recover workers that died while an AI request was in progress.
+     * A stale job is re-queued when attempts remain, or permanently failed
+     * after the maximum retry count has been reached.
+     */
+    public static function recover_stale_jobs() {
+        global $wpdb;
+
+        $table = self::table_name();
+        $cutoff = gmdate('Y-m-d H:i:s', time() - self::STALE_TIMEOUT);
+        $jobs = $wpdb->get_results($wpdb->prepare(
+            "SELECT id, attachment_id, attempts FROM {$table}
+             WHERE status = 'processing' AND started_at IS NOT NULL AND started_at < %s
+             ORDER BY id ASC LIMIT 100",
+            $cutoff
+        ), ARRAY_A);
+
+        foreach ($jobs as $job) {
+            $job_id = (int) $job['id'];
+            $attachment_id = (int) $job['attachment_id'];
+            $attempts = (int) $job['attempts'];
+
+            if ($attempts < self::MAX_ATTEMPTS) {
+                $updated = $wpdb->query($wpdb->prepare(
+                    "UPDATE {$table}
+                     SET status = 'queued', started_at = NULL, error = %s
+                     WHERE id = %d AND status = 'processing'",
+                    'Recovered stale processing job; retrying automatically.',
+                    $job_id
+                ));
+                if (1 === (int) $updated) {
+                    update_post_meta($attachment_id, '_alt_fixes_status', 'queued');
+                    self::schedule($job_id, 0);
+                }
+                continue;
+            }
+
+            $updated = $wpdb->query($wpdb->prepare(
+                "UPDATE {$table}
+                 SET status = 'failed', active = 0, error = %s, completed_at = %s
+                 WHERE id = %d AND status = 'processing'",
+                'Job timed out after the maximum number of attempts.',
+                current_time('mysql', true),
+                $job_id
+            ));
+            if (1 === (int) $updated) {
+                update_post_meta($attachment_id, '_alt_fixes_status', 'failed');
+            }
         }
     }
 
@@ -233,8 +332,6 @@ class Alt_Fixes_Queue {
 
     /**
      * Replace the original PHP-side scan with a paginated SQL query.
-     * The old scanner loaded every image ID and then read post meta for every
-     * attachment. This keeps filtering, counting, and pagination in MySQL.
      */
     public static function replace_scan_endpoint($endpoints) {
         $route = '/alt-fixes/v1/scan';
@@ -303,7 +400,8 @@ class Alt_Fixes_Queue {
         }
 
         $count_sql = "SELECT COUNT(DISTINCT p.ID) FROM {$posts} AS p {$joins} WHERE {$where}";
-        $total = (int) $wpdb->get_var($wpdb->prepare($count_sql, $args));
+        $prepared_count = $args ? $wpdb->prepare($count_sql, $args) : $count_sql;
+        $total = (int) $wpdb->get_var($prepared_count);
         $pages = $total ? (int) ceil($total / $per_page) : 0;
         $offset = ($page - 1) * $per_page;
 
@@ -341,4 +439,16 @@ class Alt_Fixes_Queue {
 }
 
 add_action(Alt_Fixes_Queue::HOOK, ['Alt_Fixes_Queue', 'process']);
+add_action(Alt_Fixes_Queue::MAINTENANCE_HOOK, ['Alt_Fixes_Queue', 'recover_stale_jobs']);
+add_action(Alt_Fixes_Queue::CRON_HOOK, ['Alt_Fixes_Queue', 'recover_stale_jobs']);
 add_filter('rest_endpoints', ['Alt_Fixes_Queue', 'replace_scan_endpoint']);
+
+add_filter('cron_schedules', function ($schedules) {
+    if (!isset($schedules['five_minutes'])) {
+        $schedules['five_minutes'] = [
+            'interval' => Alt_Fixes_Queue::MAINTENANCE_INTERVAL,
+            'display' => 'Every 5 minutes',
+        ];
+    }
+    return $schedules;
+});
