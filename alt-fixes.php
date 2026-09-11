@@ -2,12 +2,12 @@
 /**
  * Plugin Name: Alt Fixes AI
  * Description: AI-assisted image alt text suggestions with WordPress context and human approval.
- * Version: 0.8.0
+ * Version: 0.9.0
  * Author: beebus-builds
  * License: GPL-2.0-or-later
  */
 if (!defined('ABSPATH')) exit;
-define('ALT_FIXES_VERSION','0.8.0');define('ALT_FIXES_OPTION','alt_fixes_settings');define('ALT_FIXES_PATH',plugin_dir_path(__FILE__));define('ALT_FIXES_URL',plugin_dir_url(__FILE__));
+define('ALT_FIXES_VERSION','0.9.0');define('ALT_FIXES_OPTION','alt_fixes_settings');define('ALT_FIXES_PATH',plugin_dir_path(__FILE__));define('ALT_FIXES_URL',plugin_dir_url(__FILE__));
 require_once ALT_FIXES_PATH.'includes/providers/interface-alt-fixes-provider.php';require_once ALT_FIXES_PATH.'includes/providers/class-alt-fixes-openai-provider.php';require_once ALT_FIXES_PATH.'includes/class-alt-fixes-context.php';require_once ALT_FIXES_PATH.'includes/class-alt-fixes-engine.php';require_once ALT_FIXES_PATH.'includes/class-alt-fixes-queue.php';
 register_activation_hook(__FILE__,'alt_fixes_activate');function alt_fixes_activate(){Alt_Fixes_Queue::install();}register_deactivation_hook(__FILE__,'alt_fixes_deactivate');function alt_fixes_deactivate(){Alt_Fixes_Queue::unschedule_maintenance();}add_action('plugins_loaded',function(){Alt_Fixes_Queue::install();});add_action('init',function(){Alt_Fixes_Queue::schedule_maintenance();},20);
 add_action('admin_menu',function(){$hook=add_media_page('Alt Fixes AI','Alt Fixes AI','manage_options','alt-fixes-ai','alt_fixes_render_admin');add_action("admin_enqueue_scripts-{$hook}",'alt_fixes_enqueue_admin_assets');});
