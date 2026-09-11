@@ -1,11 +1,12 @@
 <?php
 /** Core alt-text generation engine. */
 if (!defined('ABSPATH')) exit;
+require_once ALT_FIXES_PATH.'includes/class-alt-fixes-learning.php';
 class Alt_Fixes_Engine {
     public static function suggest($attachment_id) {
         $attachment_id=absint($attachment_id);$file=get_attached_file($attachment_id);
         if(!$file||!file_exists($file))return new WP_Error('missing_image','Image file could not be found.',['status'=>404]);
-        $settings=get_option(ALT_FIXES_OPTION,[]);$provider=self::provider($settings['provider']??'openai',$settings);$context=Alt_Fixes_Context::for_attachment($attachment_id);
+        $settings=get_option(ALT_FIXES_OPTION,[]);$provider=self::provider($settings['provider']??'openai',$settings);$context=Alt_Fixes_Context::for_attachment($attachment_id);$context['learning']=Alt_Fixes_Learning::for_prompt($context);
         $bytes=file_get_contents($file);if($bytes===false)return new WP_Error('read_error','The image file could not be read.',['status'=>500]);
         $mime=get_post_mime_type($attachment_id)?:'image/jpeg';$data_url='data:'.$mime.';base64,'.base64_encode($bytes);if(is_wp_error($provider))return$provider;
         $result=$provider->suggest($data_url,$context);if(is_wp_error($result))return$result;
