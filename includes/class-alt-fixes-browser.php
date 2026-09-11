@@ -1,17 +1,28 @@
 <?php
 /** Browser-local AI provider helpers. */
 if (!defined('ABSPATH')) exit;
+require_once ALT_FIXES_PATH.'includes/class-alt-fixes-discovery.php';
 
 class Alt_Fixes_Browser {
     public static function boot() { add_action('rest_api_init', [__CLASS__, 'routes']); }
     public static function routes() {
         register_rest_route('alt-fixes/v1', '/browser-context/(?P<id>\d+)', ['methods'=>'GET','permission_callback'=>'alt_fixes_rest_permission','callback'=>[__CLASS__,'context']]);
         register_rest_route('alt-fixes/v1', '/browser-suggest/(?P<id>\d+)', ['methods'=>'POST','permission_callback'=>'alt_fixes_rest_permission','callback'=>[__CLASS__,'suggest']]);
+        register_rest_route('alt-fixes/v1', '/site-discovery', ['methods'=>'GET','permission_callback'=>'alt_fixes_rest_permission','callback'=>[__CLASS__,'discovery']]);
     }
     public static function context(WP_REST_Request $request) {
         $id=absint($request['id']);
         if(!alt_fixes_validate_image($id)) return new WP_Error('invalid_image','The requested attachment is not an image.',['status'=>400]);
         return rest_ensure_response(['id'=>$id,'image_url'=>wp_get_attachment_image_url($id,'full'),'title'=>get_the_title($id),'context'=>Alt_Fixes_Context::for_attachment($id),'provider'=>'browser-local','model'=>'Xenova/vit-gpt2-image-captioning','purpose_model'=>'Xenova/clip-vit-base-patch32','ocr_model'=>'Xenova/trocr-small-printed']);
+    }
+    public static function discovery(WP_REST_Request $request) {
+        $page=max(1,absint($request->get_param('page'))?:1);
+        $per_page=min(500,max(1,absint($request->get_param('per_page'))?:100));
+        $result=Alt_Fixes_Discovery::scan($page,$per_page);
+        $attachment_count=0;$external_count=0;$builder_count=0;
+        foreach((array)$result['items'] as $item){if(!empty($item['attachment_id']))$attachment_count++;else$external_count++;if(in_array('builder-data',(array)($item['sources']??[]),true))$builder_count++;}
+        $result['summary']=['attachment_images'=>$attachment_count,'external_images'=>$external_count,'builder_images'=>$builder_count,'supported_builder_detection'=>['Elementor','WPBakery','Divi','Avada','Bricks','Beaver Builder','Oxygen','Kadence','Breakdance','Spectra','GenerateBlocks','custom/unknown']];
+        return rest_ensure_response($result);
     }
     public static function suggest(WP_REST_Request $request) {
         $id=absint($request['id']);
