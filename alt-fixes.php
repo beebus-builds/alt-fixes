@@ -2,14 +2,14 @@
 /**
  * Plugin Name: Alt Fixes AI
  * Description: AI-assisted image alt text suggestions with WordPress context and human approval.
- * Version: 0.5.0
+ * Version: 0.6.0
  * Author: beebus-builds
  * License: GPL-2.0-or-later
  */
 
 if (!defined('ABSPATH')) exit;
 
-define('ALT_FIXES_VERSION', '0.5.0');
+define('ALT_FIXES_VERSION', '0.6.0');
 define('ALT_FIXES_OPTION', 'alt_fixes_settings');
 define('ALT_FIXES_PATH', plugin_dir_path(__FILE__));
 define('ALT_FIXES_URL', plugin_dir_url(__FILE__));
@@ -25,9 +25,22 @@ function alt_fixes_activate() {
     Alt_Fixes_Queue::install();
 }
 
-add_action('admin_init', function () {
+register_deactivation_hook(__FILE__, 'alt_fixes_deactivate');
+function alt_fixes_deactivate() {
+    Alt_Fixes_Queue::unschedule_maintenance();
+}
+
+// Database upgrades use a versioned install routine instead of running
+// dbDelta() on every admin request. The routine itself is cheap when current.
+add_action('plugins_loaded', function () {
     Alt_Fixes_Queue::install();
 });
+
+// Action Scheduler APIs are only used after its init phase. WP-Cron is also
+// scheduled here when Action Scheduler is unavailable.
+add_action('init', function () {
+    Alt_Fixes_Queue::schedule_maintenance();
+}, 20);
 
 add_action('admin_menu', function () {
     $hook = add_media_page('Alt Fixes AI', 'Alt Fixes AI', 'manage_options', 'alt-fixes-ai', 'alt_fixes_render_admin');
