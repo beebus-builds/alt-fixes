@@ -15,6 +15,7 @@ class Alt_Fixes_Discovery {
         }
         $attachments=get_posts(['post_type'=>'attachment','post_mime_type'=>'image','post_status'=>'inherit','posts_per_page'=>-1,'fields'=>'ids']);
         foreach($attachments as $id){$url=wp_get_attachment_url($id);if($url&&isset($found[self::normalize($url)]))$found[self::normalize($url)]['attachment_id']=$id;}
+        foreach($found as &$item) unset($item['_seen']); unset($item);
         $items=array_values($found); usort($items,function($a,$b){return strcasecmp($a['url'],$b['url']);});
         $total=count($items); return ['items'=>array_slice($items,($page-1)*$per_page,$per_page),'page'=>$page,'per_page'=>$per_page,'total'=>$total,'pages'=>$total?(int)ceil($total/$per_page):0];
     }
