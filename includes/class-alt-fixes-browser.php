@@ -28,22 +28,31 @@ class Alt_Fixes_Browser {
         if($caption==='') return new WP_Error('empty_caption','The local vision model did not return a caption.',['status'=>422]);
         $context=Alt_Fixes_Context::for_attachment($id);$context['learning']=Alt_Fixes_Learning::for_prompt($context);
         $context['browser_purpose']=['purpose'=>$purpose,'confidence'=>$purpose_confidence,'flags'=>$purpose_flags,'scores'=>$purpose_scores];
-        $override=self::context_purpose_override($context,$purpose);
-        if($override!==''){$purpose=$override;$purpose_flags[]='context_purpose_override';$purpose_confidence=max($purpose_confidence,.90);$context['browser_purpose']['context_override']=$override;}
+        $override=self::context_purpose_override($context,$purpose,$purpose_confidence,$purpose_scores);
+        if($override['purpose']!==''){$purpose=$override['purpose'];$purpose_flags=array_values(array_unique(array_merge($purpose_flags,$override['flags'])));$purpose_confidence=max($purpose_confidence,$override['confidence']);$context['browser_purpose']['context_override']=$override['purpose'];$context['browser_purpose']['context_evidence']=$override['evidence'];}
         $alt=self::caption_to_alt($caption,$ocr_text,$context,$purpose);
         $result=Alt_Fixes_Engine::finalize_browser($id,$alt,$caption,$ocr_text,$context,$purpose,$purpose_confidence,$purpose_flags);
         if(is_wp_error($result)) return $result;
         return rest_ensure_response($result);
     }
-    private static function context_purpose_override(array $context,$purpose) {
+    private static function context_purpose_override(array $context,$purpose,$confidence,$scores) {
+        $evidence=[];$candidate='';$candidate_confidence=0;
         foreach((array)($context['usages']??[]) as $usage){
             $signals=$usage['signals']??[];
-            if(!empty($signals['linked'])) return 'functional';
-            if(!empty($signals['class_hint'])&&$signals['class_hint']==='logo') return 'logo';
+            if(!empty($signals['linked'])){
+                $target=(string)($signals['link_target']??'');
+                $target_path=strtolower((string)wp_parse_url($target,PHP_URL_PATH));
+                $image_like=(bool)preg_match('/\.(?:jpe?g|png|gif|webp|avif|svg|bmp|tiff?)$/i',$target_path);
+                if($target!==''&&!$image_like){$candidate='functional';$candidate_confidence=max($candidate_confidence,.92);$evidence[]='Image is used as a link to a non-image destination: '.esc_url_raw($target);}
+            }
+            if(!empty($signals['class_hint'])&&$signals['class_hint']==='logo'){$candidate='logo';$candidate_confidence=max($candidate_confidence,.94);$evidence[]='Published image usage has a logo class hint.';}
         }
         $text=strtolower(implode(' ',array_filter([$context['attachment_title']??'',$context['caption']??'',($context['parent']['title']??''),implode(' ',(array)($context['parent']['headings']??[]))])));
-        if(preg_match('/\b(logo|brand mark|company logo|wordmark)\b/',$text)) return 'logo';
-        return '';
+        if(preg_match('/\b(logo|brand mark|company logo|wordmark)\b/',$text)){$candidate='logo';$candidate_confidence=max($candidate_confidence,.91);$evidence[]='WordPress metadata/page context explicitly references a logo or brand mark.';}
+        if($candidate==='') return ['purpose'=>'','confidence'=>0,'flags'=>[],'evidence'=>[]];
+        $conflict=$purpose!==$candidate&&$confidence>=.85;
+        if($conflict&&$candidate!=='functional'){$evidence[]='Context signal conflicts with a high-confidence visual purpose; context was not allowed to override it.';return ['purpose'=>'','confidence'=>0,'flags'=>[],'evidence'=>$evidence];}
+        return ['purpose'=>$candidate,'confidence'=>$candidate_confidence,'flags'=>['context_purpose_override'],'evidence'=>$evidence];
     }
     private static function context_phrase(array $context,$purpose) {
         $parent=$context['parent']??[];$values=[$context['attachment_title']??'',$context['caption']??'',$parent['title']??''];
