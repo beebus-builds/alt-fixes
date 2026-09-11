@@ -18,15 +18,17 @@ class Alt_Fixes_Engine {
         return ['id'=>$attachment_id,'suggestion'=>$alt,'analysis'=>$analysis,'context'=>$context];
     }
 
-    public static function finalize_browser($attachment_id,$alt,$caption,$ocr_text='',array $context=[]) {
-        $attachment_id=absint($attachment_id);$alt=sanitize_text_field($alt);$caption=sanitize_text_field($caption);$ocr_text=sanitize_textarea_field($ocr_text);
-        if($alt==='')return new WP_Error('empty_suggestion','The local vision model returned no usable alt text.',['status'=>422]);
+    public static function finalize_browser($attachment_id,$alt,$caption,$ocr_text='',array $context=[],$purpose='informative',$purpose_confidence=0.72,array $purpose_flags=[]) {
+        $attachment_id=absint($attachment_id);$alt=sanitize_text_field($alt);$caption=sanitize_text_field($caption);$ocr_text=sanitize_textarea_field($ocr_text);$purpose=sanitize_key($purpose);$purpose_confidence=max(0,min(1,(float)$purpose_confidence));
+        if($purpose==='decorative')$alt='';
+        if($alt===''&&!$purpose==='decorative')return new WP_Error('empty_suggestion','The local vision model returned no usable alt text.',['status'=>422]);
         if(!$context)$context=Alt_Fixes_Context::for_attachment($attachment_id);
         if(empty($context['learning']))$context['learning']=Alt_Fixes_Learning::for_prompt($context);
+        $flags=array_values(array_unique(array_merge(['browser_caption'],array_map('sanitize_key',$purpose_flags))));
         $analysis=self::normalize_analysis([
-            'purpose'=>'informative','decorative'=>false,'confidence'=>0.72,'quality_score'=>76,
-            'quality_flags'=>['browser_caption'],'ocr_text'=>$ocr_text,'review_reason'=>'Browser-local captioning is visual evidence only and requires human review for accessibility-sensitive cases.',
-            'evidence'=>$caption,'model'=>'Xenova/vit-gpt2-image-captioning + Xenova/trocr-small-printed (browser-local)','alt'=>$alt,
+            'purpose'=>$purpose,'decorative'=>$purpose==='decorative','confidence'=>$purpose==='decorative'?max(.85,$purpose_confidence):$purpose_confidence,'quality_score'=>$purpose==='decorative'?100:76,
+            'quality_flags'=>$flags,'ocr_text'=>$ocr_text,'review_reason'=>$purpose==='decorative'?'Decorative classification requires human confirmation before using an empty alt value.':'Browser-local captioning and purpose classification are visual evidence only and require human review for accessibility-sensitive cases.',
+            'evidence'=>$caption,'model'=>'Xenova/vit-gpt2-image-captioning + Xenova/clip-vit-base-patch32 + Xenova/trocr-small-printed (browser-local)','alt'=>$alt,
         ]);
         if($ocr_text!=='')$analysis['quality_flags'][]='ocr_present';
         $analysis['quality_flags']=array_values(array_unique($analysis['quality_flags']));
@@ -42,16 +44,19 @@ class Alt_Fixes_Engine {
     private static function normalize_analysis(array $result){$flags=[];foreach((array)($result['quality_flags']??[])as$flag){$flag=sanitize_key($flag);if($flag!==''&&!in_array($flag,$flags,true))$flags[]=$flag;}return['purpose'=>sanitize_key($result['purpose']??'informative'),'decorative'=>!empty($result['decorative']),'confidence'=>isset($result['confidence'])?max(0,min(1,(float)$result['confidence'])):null,'quality_score'=>isset($result['quality_score'])?max(0,min(100,(int)$result['quality_score'])):null,'quality_flags'=>$flags,'ocr_text'=>sanitize_textarea_field($result['ocr_text']??''),'review_reason'=>sanitize_text_field($result['review_reason']??''),'evidence'=>sanitize_text_field($result['evidence']??''),'model'=>sanitize_text_field($result['model']??''),'generated_at'=>current_time('mysql',true)];}
     private static function decision_trace(array $analysis,array $context){$parent=$context['parent']??[];$usages=[];foreach((array)($context['usages']??[])as$usage){$usages[]=['title'=>sanitize_text_field($usage['title']??''),'type'=>sanitize_key($usage['type']??''),'headings'=>array_values(array_filter(array_map('sanitize_text_field',(array)($usage['headings']??[]))))];}return['image_evidence'=>$analysis['evidence'],'purpose'=>$analysis['purpose'],'page_context'=>['attachment_title'=>sanitize_text_field($context['attachment_title']??''),'caption'=>sanitize_text_field($context['caption']??''),'parent'=>['title'=>sanitize_text_field($parent['title']??''),'type'=>sanitize_key($parent['type']??''),'headings'=>array_values(array_filter(array_map('sanitize_text_field',(array)($parent['headings']??[]))))],'usages'=>$usages],'ocr'=>$analysis['ocr_text'],'learned_guidance'=>is_array($context['learning']??null)?($context['learning']['site_rules']??[]):[],'accessibility_checks'=>['quality_score'=>$analysis['quality_score'],'confidence'=>$analysis['confidence'],'quality_flags'=>$analysis['quality_flags'],'approval'=>$analysis['approval']??[],'review_reason'=>$analysis['review_reason']]];}
     private static function quality_gate($alt,array &$analysis,array $context){$score=(int)($analysis['quality_score']??50);$confidence=(float)($analysis['confidence']??0);$purpose=$analysis['purpose'];$flags=$analysis['quality_flags'];$reasons=[];
-        if($analysis['decorative']){$analysis['quality_score']=100;$analysis['confidence']=max($confidence,.85);return['auto_approvable'=>true,'decision'=>'pass','reason'=>'Decorative image: use a null alt value.','threshold'=>90,'score'=>100];}
+        if($analysis['decorative']){$analysis['quality_score']=100;$analysis['confidence']=max($confidence,.85);$analysis['quality_flags']=array_values(array_unique(array_merge($flags,['decorative_candidate'])));return['auto_approvable'=>false,'decision'=>'review','reason'=>'Classified as decorative: confirm that the image conveys no meaningful information, then approve an empty alt value.','threshold'=>90,'score'=>100];}
         if($alt===''){$reasons[]='No usable alt text was generated.';}
         if(preg_match('/^(?:an? |the )?(?:image|picture|photo|graphic)\s+(?:of|showing)\b/i',$alt)){$flags[]='generic_opening';$score-=10;$reasons[]='Alt text starts with a redundant image label.';}
         $words=preg_split('/\s+/',trim($alt));$word_count=count(array_filter($words));if($word_count<3){$flags[]='too_short';$score-=15;$reasons[]='Alt text is too short to establish the image purpose.';}elseif($word_count>25){$flags[]='excessive_length';$score-=10;$reasons[]='Alt text is longer than a concise alternative should normally be.';}
         if(in_array($purpose,['chart','diagram','complex'],true)){$flags[]='complex_visual';$score-=5;$reasons[]='Complex visual requires a separate detailed text equivalent.';}
+        if(in_array($purpose,['logo','functional'],true)){$flags[]='purpose_sensitive';$reasons[]=$purpose==='logo'?'Logo/brand alt text should identify the brand when that information is available.':'Functional image alt text should communicate the action or destination, not merely describe appearance.';}
+        if($purpose==='product'){$flags[]='product_context';$reasons[]='Product imagery should be checked against the product name and surrounding page context.';}
+        if($purpose==='text'){$flags[]='text_heavy';$reasons[]='Text-heavy imagery should be checked against OCR and an equivalent textual alternative.';}
         if($confidence<.85){$flags[]='low_confidence';$score-=10;$reasons[]='Model confidence is below the automatic approval threshold.';}
-        if(!empty($analysis['ocr_text'])&&in_array($purpose,['text','logo','chart','diagram','screenshot'],true)&&strlen($analysis['ocr_text'])>0){$flags[]='ocr_present';}
+        if(!empty($analysis['ocr_text'])&&in_array($purpose,['text','logo','chart','diagram','screenshot','functional'],true)&&strlen($analysis['ocr_text'])>0){$flags[]='ocr_present';}
         if(in_array('unreadable_text',$flags,true)||in_array('ambiguous_purpose',$flags,true)||in_array('hallucination_risk',$flags,true)||in_array('context_conflict',$flags,true)){$score-=10;$reasons[]='The analysis contains a high-risk quality flag.';}
         $score=max(0,min(100,$score));$analysis['quality_score']=$score;$analysis['quality_flags']=array_values(array_unique($flags));
-        $hard_review=in_array($purpose,['chart','diagram','complex'],true)||!empty(array_intersect($analysis['quality_flags'],['unreadable_text','ambiguous_purpose','hallucination_risk','context_conflict','browser_caption']));
+        $hard_review=in_array($purpose,['chart','diagram','complex','logo','functional','product','text'],true)||!empty(array_intersect($analysis['quality_flags'],['unreadable_text','ambiguous_purpose','hallucination_risk','context_conflict','browser_caption','purpose_sensitive','product_context','text_heavy']));
         $auto=$score>=90&&$confidence>=.90&&!$hard_review&&$word_count>=3&&$word_count<=25;
         if(!$auto&&$reasons===[])$reasons[]='Quality score does not meet the automatic approval threshold.';
         return['auto_approvable'=>$auto,'decision'=>$auto?'pass':'review','reason'=>implode(' ',$reasons),'threshold'=>90,'score'=>$score];}
