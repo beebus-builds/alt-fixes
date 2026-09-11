@@ -1,168 +1,40 @@
 (function () {
     'use strict';
-
     const config = window.AltFixesAdmin || {};
     const root = document.getElementById('alt-fixes-results');
     const scanButton = document.getElementById('alt-fixes-scan');
     if (!root || !scanButton) return;
+    let state = { page:1, pages:1, status:'missing', jobIds:[], polling:false };
+    const esc=(value)=>String(value??'').replace(/[&<>\"]/g,(char)=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[char]));
+    const selectedIds=()=>[...root.querySelectorAll('.item-select:checked')].map((el)=>Number(el.closest('.alt-fixes-card').dataset.id));
+    const request=async(path,options={})=>{const response=await fetch((config.root||'/wp-json/alt-fixes/v1/')+path.replace(/^\//,''),{credentials:'same-origin',...options,headers:{'X-WP-Nonce':config.nonce||'','Content-Type':'application/json',...(options.headers||{})}});const data=await response.json();if(!response.ok)throw new Error(data.message||'Request failed.');return data;};
 
-    let state = { page: 1, pages: 1, status: 'missing', jobIds: [], polling: false };
-
-    const esc = (value) => String(value ?? '').replace(/[&<>\"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;' }[char]));
-    const selectedIds = () => [...root.querySelectorAll('.item-select:checked')].map((el) => Number(el.closest('.alt-fixes-card').dataset.id));
-
-    const request = async (path, options = {}) => {
-        const response = await fetch((config.root || '/wp-json/alt-fixes/v1/') + path.replace(/^\//, ''), {
-            credentials: 'same-origin', ...options,
-            headers: { 'X-WP-Nonce': config.nonce || '', 'Content-Type': 'application/json', ...(options.headers || {}) }
-        });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.message || 'Request failed.');
-        return data;
+    const render=(data)=>{
+        const items=data.items||[];state.page=Number(data.page||1);state.pages=Number(data.pages||1);
+        root.innerHTML=`${state.jobIds.length?'<div class="alt-fixes-job-status" aria-live="polite">Checking queue progress…</div>':''}${!items.length?'<div class="alt-fixes-empty">No images match this filter.</div>`:`
+        <div class="alt-fixes-toolbar"><div><strong>${Number(data.total||items.length)} image${Number(data.total||items.length)===1?'':'s'}</strong></div><div class="alt-fixes-toolbar-actions"><select class="alt-fixes-filter" id="alt-fixes-status-filter">${['missing','queued','processing','suggested','failed','approved','skipped','all'].map(s=>`<option value="${s}" ${state.status===s?'selected':''}>${s[0].toUpperCase()+s.slice(1)}</option>`).join('')}</select><button class="button" id="alt-fixes-select-all">Select all</button><button class="button button-primary" id="alt-fixes-bulk-generate">Queue selected</button><button class="button" id="alt-fixes-bulk-approve">Approve selected</button></div></div>
+        <div class="alt-fixes-grid">${items.map(item=>`<article class="alt-fixes-card ${item.status==='approved'?'is-approved':''}" data-id="${Number(item.id)}"><label class="alt-fixes-select"><input type="checkbox" class="item-select"> Select</label><img src="${esc(item.url||'')}" alt="" loading="lazy"><div class="alt-fixes-card-body"><h3>${esc(item.title||'(untitled)')}</h3><p class="alt-fixes-meta">Current alt: ${esc(item.alt||'None')}</p><span class="alt-fixes-badge">${esc(item.status||'unknown')}</span>${item.purpose?`<span class="alt-fixes-badge">${esc(item.purpose)}</span>`:''}${item.confidence!==null&&item.confidence!==undefined?`<span class="alt-fixes-badge">Confidence: ${Math.round(Number(item.confidence)*100)}%</span>`:''}<textarea class="alt-fixes-input" placeholder="Generate a suggestion…">${esc(item.suggestion||'')}</textarea><div class="alt-fixes-actions"><button class="button suggest">Generate</button><button class="button button-primary approve">Approve</button>${item.status==='failed'?'<button class="button retry">Retry</button>':''}<button class="button skip">Skip</button></div><div class="alt-fixes-status" aria-live="polite">${esc(item.error||item.review_reason||(item.status==='failed'?'Background analysis failed. Click Retry to run it again.':''))}</div></div></article>`).join('')}</div><div class="alt-fixes-toolbar"><button class="button prev" ${state.page<=1?'disabled':''}>Previous</button><span>Page ${state.page} of ${state.pages}</span><button class="button next" ${state.page>=state.pages?'disabled':''}>Next</button></div>`}`;
+        const selectAll=document.getElementById('alt-fixes-select-all'),filter=document.getElementById('alt-fixes-status-filter'),bulkGenerateButton=document.getElementById('alt-fixes-bulk-generate'),bulkApproveButton=document.getElementById('alt-fixes-bulk-approve');
+        if(selectAll)selectAll.onclick=()=>root.querySelectorAll('.item-select').forEach(c=>{c.checked=true;});
+        if(filter)filter.onchange=(e)=>{state.status=e.target.value;state.page=1;load();};
+        if(bulkGenerateButton)bulkGenerateButton.onclick=bulkGenerate;if(bulkApproveButton)bulkApproveButton.onclick=bulkApprove;
+        const prev=root.querySelector('.prev'),next=root.querySelector('.next');if(prev)prev.onclick=()=>{state.page--;load();};if(next)next.onclick=()=>{state.page++;load();};
+        root.querySelectorAll('.alt-fixes-card').forEach(bindCard);if(state.jobIds.length)updateJobStatus();
     };
 
-    const render = (data) => {
-        const items = data.items || [];
-        state.page = Number(data.page || 1); state.pages = Number(data.pages || 1);
-        root.innerHTML = `
-            ${state.jobIds.length ? '<div class="alt-fixes-job-status" aria-live="polite">Checking queue progress…</div>' : ''}
-            ${!items.length ? '<div class="alt-fixes-empty">No images match this filter.</div>' : `
-            <div class="alt-fixes-toolbar">
-                <div><strong>${Number(data.total || items.length)} image${Number(data.total || items.length) === 1 ? '' : 's'}</strong></div>
-                <div class="alt-fixes-toolbar-actions">
-                    <select class="alt-fixes-filter" id="alt-fixes-status-filter">
-                        ${['missing','queued','processing','suggested','failed','approved','skipped','all'].map(s => `<option value="${s}" ${state.status === s ? 'selected' : ''}>${s[0].toUpperCase()+s.slice(1)}</option>`).join('')}
-                    </select>
-                    <button class="button" id="alt-fixes-select-all">Select all</button>
-                    <button class="button button-primary" id="alt-fixes-bulk-generate">Queue selected</button>
-                    <button class="button" id="alt-fixes-bulk-approve">Approve selected</button>
-                </div>
-            </div>
-            <div class="alt-fixes-grid">${items.map(item => `
-                <article class="alt-fixes-card ${item.status === 'approved' ? 'is-approved' : ''}" data-id="${Number(item.id)}">
-                    <label class="alt-fixes-select"><input type="checkbox" class="item-select"> Select</label>
-                    <img src="${esc(item.url || '')}" alt="" loading="lazy">
-                    <div class="alt-fixes-card-body">
-                        <h3>${esc(item.title || '(untitled)')}</h3>
-                        <p class="alt-fixes-meta">Current alt: ${esc(item.alt || 'None')}</p>
-                        <span class="alt-fixes-badge">${esc(item.status || 'unknown')}</span>
-                        ${item.purpose ? `<span class="alt-fixes-badge">${esc(item.purpose)}</span>` : ''}
-                        ${item.confidence !== null && item.confidence !== undefined ? `<span class="alt-fixes-badge">Confidence: ${Math.round(Number(item.confidence)*100)}%</span>` : ''}
-                        <textarea class="alt-fixes-input" placeholder="Generate a suggestion…">${esc(item.suggestion || '')}</textarea>
-                        <div class="alt-fixes-actions">
-                            <button class="button suggest">Generate</button><button class="button button-primary approve">Approve</button><button class="button skip">Skip</button>
-                        </div>
-                        <div class="alt-fixes-status" aria-live="polite">${esc(item.review_reason || (item.status === 'failed' ? 'Background analysis failed. Queue it again to retry.' : ''))}</div>
-                    </div>
-                </article>`).join('')}</div>
-            <div class="alt-fixes-toolbar">
-                <button class="button prev" ${state.page <= 1 ? 'disabled' : ''}>Previous</button>
-                <span>Page ${state.page} of ${state.pages}</span>
-                <button class="button next" ${state.page >= state.pages ? 'disabled' : ''}>Next</button>
-            </div>`}`;
-
-        const selectAll = document.getElementById('alt-fixes-select-all');
-        const filter = document.getElementById('alt-fixes-status-filter');
-        const bulkGenerateButton = document.getElementById('alt-fixes-bulk-generate');
-        const bulkApproveButton = document.getElementById('alt-fixes-bulk-approve');
-        if (selectAll) selectAll.onclick = () => root.querySelectorAll('.item-select').forEach(c => { c.checked = true; });
-        if (filter) filter.onchange = (e) => { state.status = e.target.value; state.page = 1; load(); };
-        if (bulkGenerateButton) bulkGenerateButton.onclick = bulkGenerate;
-        if (bulkApproveButton) bulkApproveButton.onclick = bulkApprove;
-        const prev = root.querySelector('.prev');
-        const next = root.querySelector('.next');
-        if (prev) prev.onclick = () => { state.page--; load(); };
-        if (next) next.onclick = () => { state.page++; load(); };
-        root.querySelectorAll('.alt-fixes-card').forEach(bindCard);
-        if (state.jobIds.length) updateJobStatus();
+    const bindCard=(card)=>{
+        const id=card.dataset.id,input=card.querySelector('.alt-fixes-input'),status=card.querySelector('.alt-fixes-status'),buttons=card.querySelectorAll('button');
+        card.querySelector('.suggest').onclick=async()=>{buttons.forEach(b=>b.disabled=true);status.textContent='Analyzing image and page context…';try{const data=await request(`suggest/${id}`,{method:'POST'});input.value=data.suggestion||data.alt||'';status.textContent=data.review_reason?`Review: ${data.review_reason}`:'Suggestion ready for review.';}catch(e){status.textContent=e.message;}finally{buttons.forEach(b=>b.disabled=false);}};
+        card.querySelector('.approve').onclick=async()=>{const alt=input.value.trim();if(!alt){status.textContent='Add or generate alt text before approving.';return;}buttons.forEach(b=>b.disabled=true);status.textContent='Saving…';try{await request(`approve/${id}`,{method:'POST',body:JSON.stringify({alt})});card.classList.add('is-approved');status.textContent='Approved and saved to the Media Library.';}catch(e){status.textContent=e.message;buttons.forEach(b=>b.disabled=false);}};
+        const retry=card.querySelector('.retry');if(retry)retry.onclick=async()=>{buttons.forEach(b=>b.disabled=true);status.textContent='Re-queueing failed job…';try{await request(`jobs/${id}/retry`,{method:'POST'});status.textContent='Retry queued. The background worker will process it shortly.';card.querySelector('.retry').remove();state.jobIds.push(Number(card.dataset.id));setTimeout(()=>{if(state.status==='failed')load();},1500);}catch(e){status.textContent=e.message;buttons.forEach(b=>b.disabled=false);}};
+        card.querySelector('.skip').onclick=async()=>{buttons.forEach(b=>b.disabled=true);status.textContent='Skipping…';try{await request(`skip/${id}`,{method:'POST'});card.remove();}catch(e){status.textContent=e.message;buttons.forEach(b=>b.disabled=false);}};
     };
 
-    const bindCard = (card) => {
-        const id = card.dataset.id, input = card.querySelector('.alt-fixes-input'), status = card.querySelector('.alt-fixes-status');
-        const buttons = card.querySelectorAll('button');
-        card.querySelector('.suggest').onclick = async () => {
-            buttons.forEach(b => b.disabled = true); status.textContent = 'Analyzing image and page context…';
-            try { const data = await request(`suggest/${id}`, {method:'POST'}); input.value = data.suggestion || data.alt || ''; status.textContent = data.review_reason ? `Review: ${data.review_reason}` : 'Suggestion ready for review.'; }
-            catch (e) { status.textContent = e.message; } finally { buttons.forEach(b => b.disabled = false); }
-        };
-        card.querySelector('.approve').onclick = async () => {
-            const alt = input.value.trim(); if (!alt) { status.textContent = 'Add or generate alt text before approving.'; return; }
-            buttons.forEach(b => b.disabled = true); status.textContent = 'Saving…';
-            try { await request(`approve/${id}`, {method:'POST', body:JSON.stringify({alt})}); card.classList.add('is-approved'); status.textContent = 'Approved and saved to the Media Library.'; }
-            catch (e) { status.textContent = e.message; buttons.forEach(b => b.disabled = false); }
-        };
-        card.querySelector('.skip').onclick = async () => {
-            buttons.forEach(b => b.disabled = true); status.textContent = 'Skipping…';
-            try { await request(`skip/${id}`, {method:'POST'}); card.remove(); }
-            catch (e) { status.textContent = e.message; buttons.forEach(b => b.disabled = false); }
-        };
-    };
+    async function bulkGenerate(){const ids=selectedIds();if(!ids.length)return alert('Select at least one image.');if(ids.length>500)return alert('Select no more than 500 images per queue batch.');setToolbarBusy(true);try{const data=await request('bulk-suggest',{method:'POST',body:JSON.stringify({ids})});state.jobIds=data.job_ids||[];state.status='queued';state.page=1;await load();updateJobStatus();}catch(e){alert(e.message);}finally{setToolbarBusy(false);}}
+    async function bulkApprove(){const cards=[...root.querySelectorAll('.alt-fixes-card')].filter(c=>c.querySelector('.item-select')?.checked);const items=cards.map(c=>({id:Number(c.dataset.id),alt:c.querySelector('.alt-fixes-input').value.trim()})).filter(x=>x.alt);if(!items.length)return alert('Select images with alt text ready for approval.');setToolbarBusy(true);try{await request('bulk-approve',{method:'POST',body:JSON.stringify({items})});await load();}catch(e){alert(e.message);}finally{setToolbarBusy(false);}}
+    function setToolbarBusy(busy){root.querySelectorAll('.alt-fixes-toolbar button,.alt-fixes-toolbar select').forEach(el=>el.disabled=busy);}
 
-    async function bulkGenerate() {
-        const ids = selectedIds();
-        if (!ids.length) return alert('Select at least one image.');
-        if (ids.length > 500) return alert('Select no more than 500 images per queue batch.');
-        setToolbarBusy(true);
-        try {
-            const data = await request('bulk-suggest', {method:'POST', body:JSON.stringify({ids})});
-            state.jobIds = data.job_ids || [];
-            state.status = 'queued';
-            state.page = 1;
-            await load();
-            updateJobStatus();
-        } catch (e) { alert(e.message); } finally { setToolbarBusy(false); }
-    }
-
-    async function bulkApprove() {
-        const cards = [...root.querySelectorAll('.alt-fixes-card')].filter(c => c.querySelector('.item-select')?.checked);
-        const items = cards.map(c => ({id:Number(c.dataset.id), alt:c.querySelector('.alt-fixes-input').value.trim()})).filter(x => x.alt);
-        if (!items.length) return alert('Select images with alt text ready for approval.');
-        setToolbarBusy(true);
-        try { await request('bulk-approve', {method:'POST', body:JSON.stringify({items})); await load(); }
-        catch (e) { alert(e.message); } finally { setToolbarBusy(false); }
-    }
-
-    function setToolbarBusy(busy) { root.querySelectorAll('.alt-fixes-toolbar button,.alt-fixes-toolbar select').forEach(el => el.disabled = busy); }
-
-    async function updateJobStatus() {
-        if (!state.jobIds.length || state.polling) return;
-        state.polling = true;
-        try {
-            const results = await Promise.all(state.jobIds.map(id => request(`jobs/${id}`)));
-            const progress = results.reduce((acc, result) => {
-                const p = result.progress || {};
-                acc.total += Number(p.total || 0);
-                acc.queued += Number(p.queued || 0);
-                acc.processing += Number(p.processing || 0);
-                acc.completed += Number(p.completed || 0);
-                acc.failed += Number(p.failed || 0);
-                return acc;
-            }, {total:0,queued:0,processing:0,completed:0,failed:0});
-            progress.done = progress.completed + progress.failed;
-            progress.percent = progress.total ? Math.round((progress.done / progress.total) * 100) : 0;
-            const status = root.querySelector('.alt-fixes-job-status');
-            if (status) status.textContent = `Background analysis: ${progress.done}/${progress.total} complete (${progress.percent}%). ${progress.processing} processing, ${progress.queued} queued, ${progress.failed} failed.`;
-            if (progress.done >= progress.total) {
-                state.jobIds = [];
-                state.polling = false;
-                if (state.status === 'queued' || state.status === 'processing') await load();
-                return;
-            }
-            state.polling = false;
-            setTimeout(updateJobStatus, 2000);
-        } catch (e) {
-            state.polling = false;
-            const status = root.querySelector('.alt-fixes-job-status');
-            if (status) status.textContent = `Queue status unavailable: ${e.message}`;
-            setTimeout(updateJobStatus, 5000);
-        }
-    }
-
-    async function load() {
-        root.innerHTML = '<div class="alt-fixes-loading">Loading image library…</div>';
-        try { render(await request(`scan?per_page=24&page=${state.page}&status=${encodeURIComponent(state.status)}`)); }
-        catch (e) { root.innerHTML = `<div class="notice notice-error"><p>${esc(e.message)}</p></div>`; }
-    }
-
-    scanButton.onclick = () => { state.page = 1; state.status = 'missing'; state.jobIds = []; load(); };
+    async function updateJobStatus(){if(!state.jobIds.length||state.polling)return;state.polling=true;try{const results=await Promise.all(state.jobIds.map(id=>request(`jobs/${id}`)));const progress=results.reduce((acc,result)=>{const p=result.progress||{};acc.total+=Number(p.total||0);acc.queued+=Number(p.queued||0);acc.processing+=Number(p.processing||0);acc.completed+=Number(p.completed||0);acc.failed+=Number(p.failed||0);return acc;},{total:0,queued:0,processing:0,completed:0,failed:0});progress.done=progress.completed+progress.failed;progress.percent=progress.total?Math.round((progress.done/progress.total)*100):0;const status=root.querySelector('.alt-fixes-job-status');if(status)status.textContent=`Background analysis: ${progress.done}/${progress.total} complete (${progress.percent}%). ${progress.processing} processing, ${progress.queued} queued, ${progress.failed} failed.`;if(progress.done>=progress.total){state.jobIds=[];state.polling=false;if(state.status==='queued'||state.status==='processing')await load();return;}state.polling=false;setTimeout(updateJobStatus,2000);}catch(e){state.polling=false;const status=root.querySelector('.alt-fixes-job-status');if(status)status.textContent=`Queue status unavailable: ${e.message}`;setTimeout(updateJobStatus,5000);}}
+    async function load(){root.innerHTML='<div class="alt-fixes-loading">Loading image library…</div>';try{render(await request(`scan?per_page=24&page=${state.page}&status=${encodeURIComponent(state.status)}`));}catch(e){root.innerHTML=`<div class="notice notice-error"><p>${esc(e.message)}</p></div>`;}}
+    scanButton.onclick=()=>{state.page=1;state.status='missing';state.jobIds=[];load();};
 })();
