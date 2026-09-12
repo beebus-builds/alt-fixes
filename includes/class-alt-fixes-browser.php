@@ -1,6 +1,7 @@
 <?php
 /** Browser-local AI provider helpers. */
 if (!defined('ABSPATH')) exit;
+require_once ALT_FIXES_PATH.'includes/class-alt-fixes-learning.php';
 require_once ALT_FIXES_PATH.'includes/class-alt-fixes-discovery.php';
 
 class Alt_Fixes_Browser {
